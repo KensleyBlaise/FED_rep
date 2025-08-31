@@ -1,0 +1,1 @@
+This is a quick code to run the FED note titled "Wealth Heterogeneity and Consumer Spending" and available at federalreserve.gov/econres/notes/feds-notes/wealth-heterogeneity-and-consumer-spending-20250805.html#fig1
