@@ -1,7 +1,7 @@
 # ================================================================
 # FED_rep.xlsx (Sheet29) -> Figure 1 (full vs no-COVID) + Figure 2
 # Y & C already real; T & W deflated by Cons Deflator
-# No gridlines. No saving. Robust rolling CI.
+# No gridlines. Side-by-side panel for Fig 1. Robust rolling MPC line.
 # ================================================================
 suppressPackageStartupMessages({
   library(readxl)
@@ -9,18 +9,18 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(zoo)        # as.yearqtr
   library(slider)     # rolling windows
-  library(sandwich)   # robust vcov
+  library(sandwich)   # robust vcov (used for Fig1 only)
   library(lmtest)     # coeftest
 })
 
 # ---------------- CONFIG ----------------
-XLSX_FILE  <- "FED_rep.xlsx"
-SHEET      <- "Sheet29"
-BREAK_QTR  <- zoo::as.yearqtr("2012 Q1")
+XLSX_FILE   <- "FED_rep.xlsx"
+SHEET       <- "Sheet29"
+BREAK_QTR   <- zoo::as.yearqtr("2012 Q1")
 COVID_START <- zoo::as.yearqtr("2020 Q1")
 COVID_END   <- zoo::as.yearqtr("2021 Q4")
 
-# Column names (exactly as in your sheet)
+# Exact column names in your sheet
 COL_Q <- "Q"              # quarter like "Mar-00"
 COL_Y <- "Real income"    # already real
 COL_C <- "Real Cons"      # already real
@@ -57,8 +57,8 @@ if (mean(d$P, na.rm = TRUE) > 5) {
 to_real <- function(nom, p) nom / p
 d <- d %>%
   mutate(
-    T_real = to_real(T_nom, P),
-    W_real = to_real(W_nom, P),
+    T_real     = to_real(T_nom, P),
+    W_real     = to_real(W_nom, P),
     den        = Y_real - T_real,
     num        = C_real - T_real,
     ratio_data = num / den,
@@ -67,7 +67,7 @@ d <- d %>%
   filter(is.finite(ratio_data), is.finite(W_over_den)) %>%
   arrange(Date)
 
-# ---------- helpers to build / plot Figure 1 ----------
+# ---------------- helpers for Figure 1 ----------------
 build_fig1_data <- function(df) {
   ols1 <- lm(ratio_data ~ W_over_den, data = df)
   df$ratio_pred <- as.numeric(predict(ols1, newdata = df))
@@ -96,35 +96,33 @@ make_fig1_plot <- function(df, title, ylims = NULL) {
   p
 }
 
-# ---------- Figure 1: full sample ----------
+# ---------------- Figure 1: full sample ----------------
 full <- build_fig1_data(d)
 d_full <- full$df
 
-# ---------- Figure 1b: excluding COVID (2020Q1–2021Q4) ----------
+# ---------------- Figure 1b: excluding COVID (2020Q1–2021Q4) ----------------
 d_nocovid <- d %>% filter(date < COVID_START | date > COVID_END)
 nocovid <- build_fig1_data(d_nocovid)
 d_nc <- nocovid$df
 
-# Use identical y-limits for comparability
+# Identical y-limits for comparability
 ylims <- range(
   d_full$ratio_data, d_full$ratio_pred, d_full$ratio_pred_break,
   d_nc$ratio_data,   d_nc$ratio_pred,   d_nc$ratio_pred_break,
   na.rm = TRUE
 )
 
-# Side-by-side panel (no extra packages)
+# Side-by-side panels (no extra packages)
 par(mfrow = c(1, 2))
 print(make_fig1_plot(d_full, "Full Sample", ylims))
 print(make_fig1_plot(d_nc,   "Excluding COVID (2020Q1–2021Q4)", ylims))
 par(mfrow = c(1, 1))  # reset
 
-# ---------------- FIGURE 2: Rolling 10-year MPC (robust) ----------------
-# =======================  FIGURE 2 (robust)  =======================
-# Pre/post MPC from full-sample break model (using your full sample 'd')
-ols2_full <- lm(ratio_data ~ W_over_den + I(date >= BREAK_QTR) + I(date >= BREAK_QTR)*W_over_den, data = d)
-bhat <- coef(ols2_full)
+# ---------------- Figure 2: Rolling 10-year MPC (line; optional CI) -----------
+# Pre/post MPC from full-sample break model
+bhat <- coef(full$ols2)
 beta_pre  <- unname(bhat["W_over_den"])
-beta_post <- beta_pre + unname(bhat["I(date >= BREAK_QTR) * W_over_den"])
+beta_post <- beta_pre + unname(bhat["post_W"])
 
 seg_df <- tibble::tibble(
   xstart = c(min(d$date), BREAK_QTR),
@@ -132,33 +130,31 @@ seg_df <- tibble::tibble(
   beta   = c(beta_pre, beta_post)
 )
 
-# Rolling 40-quarter regression (use classical SEs for stability)
+# Rolling 40-quarter regression of ratio_data ~ W_over_den
 stopifnot(nrow(d) >= 40)
 roll <- slider::slide_index_dfr(
   .x = d, .i = d$date,
-  .before = 20, .after = 19,
+  .before = 20, .after = 19,  # centered 40q
   .f = ~{
     if (nrow(.x) < 40) {
       tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)], beta = NA_real_, se = NA_real_)
     } else {
       m  <- lm(ratio_data ~ W_over_den, data = .x)
-      ct <- lmtest::coeftest(m, vcov = vcov(m))  # classical SEs
+      ct <- lmtest::coeftest(m, vcov = vcov(m))  # classical SEs for stability
       tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)],
                      beta = ct["W_over_den","Estimate"],
                      se   = ct["W_over_den","Std. Error"])
     }
   }
-) |>
-  dplyr::mutate(
-    beta_cents = 100 * beta,
-    lo = 100 * (beta - 1.96 * se),
-    hi = 100 * (beta + 1.96 * se),
-    Date = as.Date(date)
-  ) |>
-  dplyr::arrange(Date)
+) %>%
+  mutate(beta_cents = 100 * beta,
+         lo = 100 * (beta - 1.96 * se),
+         hi = 100 * (beta + 1.96 * se),
+         Date = as.Date(date)) %>%
+  arrange(Date)
 
-# ---- Toggle CI band on/off safely ----
-SHOW_CI <- FALSE   # <- set to TRUE later if you want to try the ribbon again
+# Turn CI ribbon on/off here:
+SHOW_CI <- FALSE   # set TRUE if you want to try drawing the ribbon
 
 fig2 <- ggplot(roll, aes(x = Date, y = beta_cents)) +
   geom_line(color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
