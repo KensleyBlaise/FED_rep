@@ -1,7 +1,7 @@
 # ================================================================
 # FED_rep.xlsx (Sheet29) -> Figure 1 (full vs no-COVID) + Figure 2
 # Y & C already real; T & W deflated by Cons Deflator
-# No gridlines. Robust rolling (line only).
+# Fixed version to properly replicate Figure 2
 # ================================================================
 suppressPackageStartupMessages({
   library(readxl)
@@ -11,6 +11,7 @@ suppressPackageStartupMessages({
   library(slider)     # rolling windows
   library(sandwich)   # robust vcov (Fig 1)
   library(lmtest)     # coeftest
+  library(gridExtra)  # for side-by-side plots
 })
 
 # ---------------- CONFIG ----------------
@@ -112,63 +113,121 @@ ylims <- range(
   na.rm = TRUE
 )
 
-# Side-by-side panels (no extra packages)
-par(mfrow = c(1, 2))
-print(make_fig1_plot(d_full, "Full Sample", ylims))
-print(make_fig1_plot(d_nc,   "Excluding COVID (2020Q1–2021Q4)", ylims))
-par(mfrow = c(1, 1))  # reset
+# Side-by-side panels using gridExtra
+fig1a <- make_fig1_plot(d_full, "Full Sample", ylims)
+fig1b <- make_fig1_plot(d_nc,   "Excluding COVID (2020Q1–2021Q4)", ylims)
+grid.arrange(fig1a, fig1b, ncol = 2)
 
-# ---------------- Figure 2: Rolling 10-year MPC (minimal & robust) -----------
+# ---------------- Figure 2: Rolling 10-year MPC with confidence bands ----------------
 # Pre/post MPC from full-sample break model
 bhat <- coef(full$ols2)
 beta_pre  <- unname(bhat["W_over_den"])
 beta_post <- beta_pre + unname(bhat["post_W"])
-seg_df <- tibble::tibble(
-  xstart = c(min(d$date), BREAK_QTR),
-  xend   = c(BREAK_QTR - 0.25, max(d$date)),
+
+# Create trend break lines
+seg_df <- data.frame(
+  xstart = c(min(d$Date), as.Date(BREAK_QTR)),
+  xend   = c(as.Date(BREAK_QTR) - 90, max(d$Date)), # subtract ~3 months
   beta   = c(beta_pre, beta_post)
 )
 
-# Rolling β builder
-build_roll <- function(df, before, after) {
-  slider::slide_index_dfr(
-    .x = df, .i = df$date,
-    .before = before, .after = after,
-    .f = ~{
-      if (nrow(.x) < 40) {
-        tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)], beta = NA_real_)
-      } else {
-        b <- coef(lm(ratio_data ~ W_over_den, data = .x))["W_over_den"]
-        tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)], beta = as.numeric(b))
-      }
+# Enhanced rolling β builder with confidence intervals
+build_roll_with_ci <- function(df, window_size = 40) {
+  results <- list()
+  n <- nrow(df)
+  
+  for (i in (window_size):(n)) {
+    # Get 10-year (40 quarters) window
+    window_data <- df[(i - window_size + 1):i, ]
+    
+    if (nrow(window_data) >= window_size && 
+        sum(is.finite(window_data$ratio_data)) >= window_size * 0.8) {
+      
+      tryCatch({
+        model <- lm(ratio_data ~ W_over_den, data = window_data)
+        coef_est <- coef(model)["W_over_den"]
+        se <- summary(model)$coefficients["W_over_den", "Std. Error"]
+        
+        results[[length(results) + 1]] <- data.frame(
+          date = window_data$date[ceiling(nrow(window_data)/2)],
+          Date = window_data$Date[ceiling(nrow(window_data)/2)],
+          beta = as.numeric(coef_est),
+          se = se,
+          beta_cents = 100 * as.numeric(coef_est),
+          lower = 100 * (as.numeric(coef_est) - 1.96 * se),
+          upper = 100 * (as.numeric(coef_est) + 1.96 * se)
+        )
+      }, error = function(e) {
+        # Skip this window if there's an error
+      })
     }
-  ) |>
-    dplyr::mutate(beta_cents = 100*beta, Date = as.Date(date)) |>
-    dplyr::arrange(Date)
+  }
+  
+  do.call(rbind, results)
 }
 
-# Centered 40q; if no finite points, fall back to trailing 40q
-roll <- build_roll(d, before = 20, after = 19)
-n_fin <- sum(is.finite(roll$beta_cents))
-message("Centered 40q rolling: finite points = ", n_fin, " / ", nrow(roll))
-if (n_fin == 0) {
-  message("Falling back to trailing 40q window…")
-  roll <- build_roll(d, before = 39, after = 0)
-  n_fin <- sum(is.finite(roll$beta_cents))
-  message("Trailing 40q rolling: finite points = ", n_fin, " / ", nrow(roll))
+# Calculate rolling estimates
+roll <- build_roll_with_ci(d, window_size = 40)
+
+if (nrow(roll) == 0) {
+  stop("No valid rolling window estimates could be calculated. Check your data.")
 }
 
-# Plot line + dashed pre/post levels (no ribbon)
-fig2 <- ggplot(roll, aes(x = Date, y = beta_cents)) +
-  geom_line(na.rm = TRUE, linewidth = 1.0, color = "#E31A1C") +
+message("Rolling 40q window: ", nrow(roll), " estimates calculated")
+message("Beta range: ", round(min(roll$beta_cents, na.rm = TRUE), 2), " to ", 
+        round(max(roll$beta_cents, na.rm = TRUE), 2), " cents")
+
+# Add recession shading (approximate dates for major recessions)
+recession_data <- data.frame(
+  start = as.Date(c("1990-07-01", "2001-03-01", "2007-12-01")),
+  end = as.Date(c("1991-03-01", "2001-11-01", "2009-06-01"))
+)
+
+# Create Figure 2 matching the original
+fig2 <- ggplot() +
+  # Add recession shading
+  geom_rect(data = recession_data, 
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+            fill = "gray80", alpha = 0.7) +
+  # Add confidence band (pink shaded area)
+  geom_ribbon(data = roll, aes(x = Date, ymin = lower, ymax = upper),
+              fill = "#FF6B6B", alpha = 0.3) +
+  # Add main rolling estimate line (red)
+  geom_line(data = roll, aes(x = Date, y = beta_cents),
+            color = "#FF6B6B", linewidth = 1.2) +
+  # Add trend break horizontal lines (dashed black)
   geom_segment(data = seg_df,
-               aes(x = as.Date(xstart), xend = as.Date(xend),
-                   y = 100*beta, yend = 100*beta),
-               inherit.aes = FALSE, linetype = "dashed", color = "black", linewidth = 0.9) +
-  scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
-  labs(title = "Figure 2. Rolling 10-year MPC (line only)", x = NULL) +
+               aes(x = xstart, xend = xend, y = 100*beta, yend = 100*beta),
+               linetype = "dashed", color = "black", linewidth = 0.8) +
+  # Formatting to match original
+  scale_y_continuous("Cents", 
+                     limits = c(2.5, 3.5), 
+                     breaks = seq(2.5, 3.5, 0.2),
+                     expand = c(0, 0)) +
+  scale_x_date(expand = c(0, 0), 
+               limits = c(as.Date("1988-01-01"), as.Date("2022-01-01"))) +
+  labs(title = "Figure 2. The Propensity to Consume out of Wealth", 
+       x = NULL) +
   theme_minimal(base_size = 12) +
-  theme(panel.grid = element_blank())
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = "black"),
+    plot.background = element_rect(fill = "white"),
+    plot.title = element_text(hjust = 0.5, size = 14, margin = margin(b = 20)),
+    axis.line = element_line(color = "black"),
+    legend.position = "bottom"
+  ) +
+  # Add legend manually
+  annotate("text", x = as.Date("2010-01-01"), y = 2.6, 
+           label = "Model with Trend Break", size = 3) +
+  annotate("text", x = as.Date("2010-01-01"), y = 2.55, 
+           label = "Rolling Window", size = 3, color = "#FF6B6B")
 
 print(fig2)
-# ================================================================
+
+# Print summary statistics
+cat("\nSummary of Rolling MPC Estimates:\n")
+cat("1990s-early 2000s average:", round(mean(roll$beta_cents[roll$Date < as.Date("2005-01-01")], na.rm = TRUE), 2), "cents\n")
+cat("2016+ average:", round(mean(roll$beta_cents[roll$Date >= as.Date("2016-01-01")], na.rm = TRUE), 2), "cents\n")
+cat("Pre-trend break (", format(as.Date(BREAK_QTR), "%Y"), "):", round(100 * beta_pre, 2), "cents\n")
+cat("Post-trend break:", round(100 * beta_post, 2), "cents\n")
