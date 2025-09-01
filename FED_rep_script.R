@@ -118,11 +118,12 @@ print(make_fig1_plot(d_full, "Full Sample", ylims))
 print(make_fig1_plot(d_nc,   "Excluding COVID (2020Q1–2021Q4)", ylims))
 par(mfrow = c(1, 1))  # reset
 
-# ---------- Figure 2: Rolling 10-year MPC (robust CI) ----------
-# Pre/post MPC from full-sample break model
-bhat <- coef(full$ols2)
+# ---------------- FIGURE 2: Rolling 10-year MPC (robust) ----------------
+# Pre/post MPC from the full-sample break model (reuse your full-sample break fit if available)
+ols2_full <- lm(ratio_data ~ W_over_den + I(date >= BREAK_QTR) + I(date >= BREAK_QTR)*W_over_den, data = d)
+bhat <- coef(ols2_full)
 beta_pre  <- unname(bhat["W_over_den"])
-beta_post <- beta_pre + unname(bhat["post_W"])
+beta_post <- beta_pre + unname(bhat["I(date >= BREAK_QTR) * W_over_den"])
 
 seg_df <- tibble::tibble(
   xstart = c(min(d$date), BREAK_QTR),
@@ -131,11 +132,9 @@ seg_df <- tibble::tibble(
 )
 
 # Rolling 40-quarter regression of ratio_data ~ W_over_den
-if (nrow(d) < 40) stop("Rolling window needs at least 40 quarters; found: ", nrow(d))
-
 roll <- slider::slide_index_dfr(
   .x = d, .i = d$date,
-  .before = 20, .after = 19,  # centered 40q
+  .before = 20, .after = 19,
   .f = ~{
     if (nrow(.x) < 40) {
       tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)], beta = NA_real_, se = NA_real_)
@@ -147,42 +146,39 @@ roll <- slider::slide_index_dfr(
                      se   = ct["W_over_den","Std. Error"])
     }
   }
-) %>%
-  mutate(beta_cents = 100 * beta,
-         lo = 100 * (beta - 1.96 * se),
-         hi = 100 * (beta + 1.96 * se),
-         Date = as.Date(date)) %>%
-  arrange(Date)
+) |>
+  dplyr::mutate(beta_cents = 100*beta,
+                lo = 100*(beta - 1.96*se),
+                hi = 100*(beta + 1.96*se),
+                Date = as.Date(date)) |>
+  dplyr::arrange(Date)
 
-# Clean rows for ribbon; fall back to line-only if none left
-roll_clean <- dplyr::filter(roll, is.finite(lo), is.finite(hi))
+# Keep only rows that can draw a ribbon
+roll_clean <- roll |>
+  dplyr::filter(is.finite(lo), is.finite(hi), is.finite(Date))
 
+# Build the plot
+fig2 <- ggplot() +
+  geom_line(data = roll, aes(x = Date, y = beta_cents),
+            color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
+  geom_segment(data = seg_df,
+               aes(x = as.Date(xstart), xend = as.Date(xend),
+                   y = 100*beta, yend = 100*beta),
+               linetype = "dashed", color = "black", linewidth = 0.9) +
+  scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
+  labs(title = "Figure 2. Rolling 10-year MPC", x = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank())
+
+# Add ribbon only if there are rows to draw
 if (nrow(roll_clean) > 0) {
-  fig2 <- ggplot() +
-    geom_ribbon(data = roll_clean, aes(x = Date, ymin = lo, ymax = hi),
+  fig2 <- fig2 +
+    geom_ribbon(data = roll_clean,
+                aes(x = Date, ymin = lo, ymax = hi),
+                inherit.aes = FALSE,
                 fill = "#FB9A99", alpha = 0.35, na.rm = TRUE) +
-    geom_line(data = roll, aes(x = Date, y = beta_cents),
-              color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
-    geom_segment(data = seg_df,
-                 aes(x = as.Date(xstart), xend = as.Date(xend),
-                     y = 100*beta, yend = 100*beta),
-                 linetype = "dashed", color = "black", linewidth = 0.9) +
-    scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
-    labs(title = "Figure 2. Rolling 10-year MPC (with 95% CI)", x = NULL) +
-    theme_minimal(base_size = 12) +
-    theme(panel.grid = element_blank())
-} else {
-  warning("Rolling-window CIs are all NA; plotting line without ribbon.")
-  fig2 <- ggplot(roll, aes(x = Date, y = beta_cents)) +
-    geom_line(color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
-    geom_segment(data = seg_df,
-                 aes(x = as.Date(xstart), xend = as.Date(xend),
-                     y = 100*beta, yend = 100*beta),
-                 linetype = "dashed", color = "black", linewidth = 0.9) +
-    scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
-    labs(title = "Figure 2. Rolling 10-year MPC", x = NULL) +
-    theme_minimal(base_size = 12) +
-    theme(panel.grid = element_blank())
+    labs(title = "Figure 2. Rolling 10-year MPC (with 95% CI)")
 }
 
 print(fig2)
+
