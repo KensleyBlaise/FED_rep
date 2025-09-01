@@ -159,26 +159,26 @@ roll_clean <- roll |>
 
 # Build the plot
 fig2 <- ggplot() +
+  geom_ribbon(data = roll,
+              aes(x = Date, ymin = lo, ymax = hi),
+              inherit.aes = FALSE,
+              fill = "#FB9A99", alpha = 0.35, na.rm = TRUE) +
   geom_line(data = roll, aes(x = Date, y = beta_cents),
             color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
   geom_segment(data = seg_df,
                aes(x = as.Date(xstart), xend = as.Date(xend),
                    y = 100*beta, yend = 100*beta),
+               inherit.aes = FALSE,
                linetype = "dashed", color = "black", linewidth = 0.9) +
-  scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
-  labs(title = "Figure 2. Rolling 10-year MPC", x = NULL) +
+  scale_y_continuous("Cents", limits = c(2.5, 3.5),
+                     breaks = seq(2.5, 3.5, 0.2)) +
+  labs(title = "Figure 2. Rolling 10-year MPC (with 95% CI)", x = NULL) +
   theme_minimal(base_size = 12) +
   theme(panel.grid = element_blank())
 
-# Add ribbon only if there are rows to draw
-if (nrow(roll_clean) > 0) {
-  fig2 <- fig2 +
-    geom_ribbon(data = roll_clean,
-                aes(x = Date, ymin = lo, ymax = hi),
-                inherit.aes = FALSE,
-                fill = "#FB9A99", alpha = 0.35, na.rm = TRUE) +
-    labs(title = "Figure 2. Rolling 10-year MPC (with 95% CI)")
-}
+print(fig2)
+
+
 
 print(fig2)
 
