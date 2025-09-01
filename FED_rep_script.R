@@ -1,7 +1,7 @@
 # ================================================================
 # FED_rep.xlsx (Sheet29) -> Figure 1 (full vs no-COVID) + Figure 2
 # Y & C already real; T & W deflated by Cons Deflator
-# No gridlines. Side-by-side panel for Fig 1. Robust rolling MPC line.
+# No gridlines. Robust rolling (line only).
 # ================================================================
 suppressPackageStartupMessages({
   library(readxl)
@@ -9,7 +9,7 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(zoo)        # as.yearqtr
   library(slider)     # rolling windows
-  library(sandwich)   # robust vcov (used for Fig1 only)
+  library(sandwich)   # robust vcov (Fig 1)
   library(lmtest)     # coeftest
 })
 
@@ -20,7 +20,7 @@ BREAK_QTR   <- zoo::as.yearqtr("2012 Q1")
 COVID_START <- zoo::as.yearqtr("2020 Q1")
 COVID_END   <- zoo::as.yearqtr("2021 Q4")
 
-# Exact column names in your sheet
+# Exact column names in the sheet
 COL_Q <- "Q"              # quarter like "Mar-00"
 COL_Y <- "Real income"    # already real
 COL_C <- "Real Cons"      # already real
@@ -118,69 +118,57 @@ print(make_fig1_plot(d_full, "Full Sample", ylims))
 print(make_fig1_plot(d_nc,   "Excluding COVID (2020Q1–2021Q4)", ylims))
 par(mfrow = c(1, 1))  # reset
 
-# ---------------- Figure 2: Rolling 10-year MPC (line; optional CI) -----------
+# ---------------- Figure 2: Rolling 10-year MPC (minimal & robust) -----------
 # Pre/post MPC from full-sample break model
 bhat <- coef(full$ols2)
 beta_pre  <- unname(bhat["W_over_den"])
 beta_post <- beta_pre + unname(bhat["post_W"])
-
 seg_df <- tibble::tibble(
   xstart = c(min(d$date), BREAK_QTR),
   xend   = c(BREAK_QTR - 0.25, max(d$date)),
   beta   = c(beta_pre, beta_post)
 )
 
-# Rolling 40-quarter regression of ratio_data ~ W_over_den
-stopifnot(nrow(d) >= 40)
-roll <- slider::slide_index_dfr(
-  .x = d, .i = d$date,
-  .before = 20, .after = 19,  # centered 40q
-  .f = ~{
-    if (nrow(.x) < 40) {
-      tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)], beta = NA_real_, se = NA_real_)
-    } else {
-      m  <- lm(ratio_data ~ W_over_den, data = .x)
-      ct <- lmtest::coeftest(m, vcov = vcov(m))  # classical SEs for stability
-      tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)],
-                     beta = ct["W_over_den","Estimate"],
-                     se   = ct["W_over_den","Std. Error"])
+# Rolling β builder
+build_roll <- function(df, before, after) {
+  slider::slide_index_dfr(
+    .x = df, .i = df$date,
+    .before = before, .after = after,
+    .f = ~{
+      if (nrow(.x) < 40) {
+        tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)], beta = NA_real_)
+      } else {
+        b <- coef(lm(ratio_data ~ W_over_den, data = .x))["W_over_den"]
+        tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)], beta = as.numeric(b))
+      }
     }
-  }
-) %>%
-  mutate(beta_cents = 100 * beta,
-         lo = 100 * (beta - 1.96 * se),
-         hi = 100 * (beta + 1.96 * se),
-         Date = as.Date(date)) %>%
-  arrange(Date)
+  ) |>
+    dplyr::mutate(beta_cents = 100*beta, Date = as.Date(date)) |>
+    dplyr::arrange(Date)
+}
 
-# Turn CI ribbon on/off here:
-SHOW_CI <- FALSE   # set TRUE if you want to try drawing the ribbon
+# Centered 40q; if no finite points, fall back to trailing 40q
+roll <- build_roll(d, before = 20, after = 19)
+n_fin <- sum(is.finite(roll$beta_cents))
+message("Centered 40q rolling: finite points = ", n_fin, " / ", nrow(roll))
+if (n_fin == 0) {
+  message("Falling back to trailing 40q window…")
+  roll <- build_roll(d, before = 39, after = 0)
+  n_fin <- sum(is.finite(roll$beta_cents))
+  message("Trailing 40q rolling: finite points = ", n_fin, " / ", nrow(roll))
+}
 
+# Plot line + dashed pre/post levels (no ribbon)
 fig2 <- ggplot(roll, aes(x = Date, y = beta_cents)) +
-  geom_line(color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
+  geom_line(na.rm = TRUE, linewidth = 1.0, color = "#E31A1C") +
   geom_segment(data = seg_df,
                aes(x = as.Date(xstart), xend = as.Date(xend),
                    y = 100*beta, yend = 100*beta),
-               inherit.aes = FALSE,
-               linetype = "dashed", color = "black", linewidth = 0.9) +
+               inherit.aes = FALSE, linetype = "dashed", color = "black", linewidth = 0.9) +
   scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
-  labs(title = "Figure 2. Rolling 10-year MPC", x = NULL) +
+  labs(title = "Figure 2. Rolling 10-year MPC (line only)", x = NULL) +
   theme_minimal(base_size = 12) +
   theme(panel.grid = element_blank())
-
-if (SHOW_CI) {
-  roll_clean <- dplyr::filter(roll, is.finite(lo), is.finite(hi), is.finite(Date))
-  if (nrow(roll_clean) > 0) {
-    fig2 <- fig2 +
-      geom_ribbon(data = roll_clean,
-                  aes(x = Date, ymin = lo, ymax = hi),
-                  inherit.aes = FALSE,
-                  fill = "#FB9A99", alpha = 0.35, na.rm = TRUE) +
-      labs(title = "Figure 2. Rolling 10-year MPC (with 95% CI)")
-  } else {
-    warning("CI band skipped: no valid lo/hi rows after filtering.")
-  }
-}
 
 print(fig2)
 # ================================================================
