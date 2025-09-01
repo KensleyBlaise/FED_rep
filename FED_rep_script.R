@@ -1,7 +1,7 @@
 # ================================================================
-# FED_rep.xlsx (Sheet29) -> Figures 1 (full vs no-COVID) + Figure 2
+# FED_rep.xlsx (Sheet29) -> Figure 1 (full vs no-COVID) + Figure 2
 # Y & C already real; T & W deflated by Cons Deflator
-# No gridlines. No file saving. Side-by-side panel for Fig 1.
+# No gridlines. No saving. Robust rolling CI.
 # ================================================================
 suppressPackageStartupMessages({
   library(readxl)
@@ -14,13 +14,13 @@ suppressPackageStartupMessages({
 })
 
 # ---------------- CONFIG ----------------
-XLSX_FILE <- "FED_rep.xlsx"
-SHEET     <- "Sheet29"
-BREAK_QTR <- zoo::as.yearqtr("2012 Q1")
+XLSX_FILE  <- "FED_rep.xlsx"
+SHEET      <- "Sheet29"
+BREAK_QTR  <- zoo::as.yearqtr("2012 Q1")
 COVID_START <- zoo::as.yearqtr("2020 Q1")
 COVID_END   <- zoo::as.yearqtr("2021 Q4")
 
-# Exact column names in the sheet
+# Column names (exactly as in your sheet)
 COL_Q <- "Q"              # quarter like "Mar-00"
 COL_Y <- "Real income"    # already real
 COL_C <- "Real Cons"      # already real
@@ -53,7 +53,7 @@ if (mean(d$P, na.rm = TRUE) > 5) {
   d$P <- d$P / 100
 }
 
-# ---------------- MAKE T & W REAL + BUILD VARIABLES -------------
+# Make T & W real; build regression variables
 to_real <- function(nom, p) nom / p
 d <- d %>%
   mutate(
@@ -67,18 +67,16 @@ d <- d %>%
   filter(is.finite(ratio_data), is.finite(W_over_den)) %>%
   arrange(Date)
 
-# ---------------- HELPER: build Fig 1 data & plot ----------------
-build_fig1_data <- function(df, title) {
+# ---------- helpers to build / plot Figure 1 ----------
+build_fig1_data <- function(df) {
   ols1 <- lm(ratio_data ~ W_over_den, data = df)
   df$ratio_pred <- as.numeric(predict(ols1, newdata = df))
-
   df <- df %>%
     mutate(post = as.integer(date >= BREAK_QTR),
            post_W = post * W_over_den)
   ols2 <- lm(ratio_data ~ W_over_den + post + post_W, data = df)
   df$ratio_pred_break <- as.numeric(predict(ols2, newdata = df))
-
-  list(df = df, ols1 = ols1, ols2 = ols2, title = title)
+  list(df = df, ols1 = ols1, ols2 = ols2)
 }
 
 make_fig1_plot <- function(df, title, ylims = NULL) {
@@ -98,30 +96,30 @@ make_fig1_plot <- function(df, title, ylims = NULL) {
   p
 }
 
-# ---------------- FIGURE 1: full sample ----------------
-full <- build_fig1_data(d, "Full Sample")
+# ---------- Figure 1: full sample ----------
+full <- build_fig1_data(d)
 d_full <- full$df
 
-# ---------------- FIGURE 1b: excluding COVID ----------------
+# ---------- Figure 1b: excluding COVID (2020Q1–2021Q4) ----------
 d_nocovid <- d %>% filter(date < COVID_START | date > COVID_END)
-nocovid <- build_fig1_data(d_nocovid, "Excluding COVID (2020Q1–2021Q4)")
+nocovid <- build_fig1_data(d_nocovid)
 d_nc <- nocovid$df
 
-# Use identical y-limits for comparability across the two panels
+# Use identical y-limits for comparability
 ylims <- range(
   d_full$ratio_data, d_full$ratio_pred, d_full$ratio_pred_break,
   d_nc$ratio_data,   d_nc$ratio_pred,   d_nc$ratio_pred_break,
   na.rm = TRUE
 )
 
-# Side-by-side panel (no gridExtra needed)
+# Side-by-side panel (no extra packages)
 par(mfrow = c(1, 2))
-print(make_fig1_plot(d_full, full$title, ylims))
-print(make_fig1_plot(d_nc,   nocovid$title, ylims))
+print(make_fig1_plot(d_full, "Full Sample", ylims))
+print(make_fig1_plot(d_nc,   "Excluding COVID (2020Q1–2021Q4)", ylims))
 par(mfrow = c(1, 1))  # reset
 
-# ---------------- FIGURE 2: Rolling MPC (10-year centered) --------
-# Pre/post MPC from the full-sample break model
+# ---------- Figure 2: Rolling 10-year MPC (robust CI) ----------
+# Pre/post MPC from full-sample break model
 bhat <- coef(full$ols2)
 beta_pre  <- unname(bhat["W_over_den"])
 beta_post <- beta_pre + unname(bhat["post_W"])
@@ -132,7 +130,7 @@ seg_df <- tibble::tibble(
   beta   = c(beta_pre, beta_post)
 )
 
-# Rolling 40-quarter regression of the same equation
+# Rolling 40-quarter regression of ratio_data ~ W_over_den
 if (nrow(d) < 40) stop("Rolling window needs at least 40 quarters; found: ", nrow(d))
 
 roll <- slider::slide_index_dfr(
@@ -149,27 +147,42 @@ roll <- slider::slide_index_dfr(
                      se   = ct["W_over_den","Std. Error"])
     }
   }
-)
-
-roll <- roll %>%
+) %>%
   mutate(beta_cents = 100 * beta,
          lo = 100 * (beta - 1.96 * se),
          hi = 100 * (beta + 1.96 * se),
-         Date = as.Date(date))
+         Date = as.Date(date)) %>%
+  arrange(Date)
 
-fig2 <- ggplot() +
-  geom_ribbon(data = roll, aes(x = Date, ymin = lo, ymax = hi),
-              fill = "#FB9A99", alpha = 0.35, na.rm = TRUE) +
-  geom_line(data = roll, aes(x = Date, y = beta_cents),
-            color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
-  geom_segment(data = seg_df,
-               aes(x = as.Date(xstart), xend = as.Date(xend),
-                   y = 100*beta, yend = 100*beta),
-               linetype = "dashed", color = "black", linewidth = 0.9) +
-  scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
-  labs(title = "Figure 2. The Propensity to Consume out of Wealth (Rolling 10-year MPC)",
-       x = NULL) +
-  theme_minimal(base_size = 12) +
-  theme(panel.grid = element_blank())
+# Clean rows for ribbon; fall back to line-only if none left
+roll_clean <- dplyr::filter(roll, is.finite(lo), is.finite(hi))
+
+if (nrow(roll_clean) > 0) {
+  fig2 <- ggplot() +
+    geom_ribbon(data = roll_clean, aes(x = Date, ymin = lo, ymax = hi),
+                fill = "#FB9A99", alpha = 0.35, na.rm = TRUE) +
+    geom_line(data = roll, aes(x = Date, y = beta_cents),
+              color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
+    geom_segment(data = seg_df,
+                 aes(x = as.Date(xstart), xend = as.Date(xend),
+                     y = 100*beta, yend = 100*beta),
+                 linetype = "dashed", color = "black", linewidth = 0.9) +
+    scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
+    labs(title = "Figure 2. Rolling 10-year MPC (with 95% CI)", x = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid = element_blank())
+} else {
+  warning("Rolling-window CIs are all NA; plotting line without ribbon.")
+  fig2 <- ggplot(roll, aes(x = Date, y = beta_cents)) +
+    geom_line(color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
+    geom_segment(data = seg_df,
+                 aes(x = as.Date(xstart), xend = as.Date(xend),
+                     y = 100*beta, yend = 100*beta),
+                 linetype = "dashed", color = "black", linewidth = 0.9) +
+    scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
+    labs(title = "Figure 2. Rolling 10-year MPC", x = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid = element_blank())
+}
 
 print(fig2)
