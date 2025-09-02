@@ -1,7 +1,7 @@
 # ================================================================
 # FED_rep.xlsx (Sheet29) -> Figure 1 (Full vs No-COVID) + Figure 2 (Rolling MPC w/ CI)
 # Y & C already real; deflate only Gov benefits and Ill wealth by Cons Deflator
-# COVID panel y-axis starts at 0.8. No gridlines.
+# Adds panel borders and "nice" axis bounds; COVID panel starts at 0.8
 # ================================================================
 suppressPackageStartupMessages({
   library(readxl)
@@ -63,6 +63,21 @@ d <- d %>%
   filter(is.finite(ratio_data), is.finite(W_over_den)) %>%
   arrange(Date)
 
+# ---------- helper: "nice" y-limits with small padding ----------
+nice_limits <- function(vals, lower = NULL, upper = NULL, pad_mult = 0.04, digits = 2) {
+  vals <- vals[is.finite(vals)]
+  r <- range(vals, na.rm = TRUE)
+  span <- max(r[2] - r[1], 1e-9)
+  pad  <- pad_mult * span
+  lo <- r[1] - pad
+  hi <- r[2] + pad
+  if (!is.null(lower)) lo <- max(lower, lo)
+  if (!is.null(upper)) hi <- min(upper, hi)
+  lo <- floor(lo * 10^digits) / 10^digits
+  hi <- ceiling(hi * 10^digits) / 10^digits
+  c(lo, hi)
+}
+
 # ---------------- Helpers for Figure 1 ----------------
 build_fig1_data <- function(df) {
   ols1 <- lm(ratio_data ~ W_over_den, data = df)
@@ -87,8 +102,12 @@ make_fig1_plot <- function(df, title, ylims = NULL) {
                                    "Predicted with Trend Break" = "#D95F02")) +
     labs(title = title, y = "Ratio", x = NULL, colour = "") +
     theme_minimal(base_size = 12) +
-    theme(panel.grid = element_blank())
-  if (!is.null(ylims)) p <- p + coord_cartesian(ylim = ylims)
+    theme(
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+      plot.background = element_blank()
+    )
+  if (!is.null(ylims)) p <- p + scale_y_continuous(limits = ylims, expand = expansion(mult = c(0,0)))
   p
 }
 
@@ -97,9 +116,8 @@ full   <- build_fig1_data(d);         d_full <- full$df
 d_nc   <- d %>% filter(date < COVID_START | date > COVID_END)
 ncfit  <- build_fig1_data(d_nc);      d_nc   <- ncfit$df
 
-# y-limits: Full panel auto; COVID panel lower bound at 0.8
-ylims_full <- range(d_full$ratio_data, d_full$ratio_pred, d_full$ratio_pred_break, na.rm = TRUE)
-ylims_nc   <- c(0.8, max(d_nc$ratio_data, d_nc$ratio_pred, d_nc$ratio_pred_break, na.rm = TRUE))
+ylims_full <- nice_limits(c(d_full$ratio_data, d_full$ratio_pred, d_full$ratio_pred_break))
+ylims_nc   <- nice_limits(c(d_nc$ratio_data,   d_nc$ratio_pred,   d_nc$ratio_pred_break), lower = 0.8)
 
 par(mfrow = c(1, 2))
 print(make_fig1_plot(d_full, "Full Sample", ylims_full))
@@ -112,9 +130,9 @@ bhat <- coef(full$ols2)
 beta_pre  <- unname(bhat["W_over_den"])
 beta_post <- beta_pre + unname(bhat["post_W"])
 
-seg_df <- tibble::tibble(
-  xstart = c(min(d$date), BREAK_QTR),
-  xend   = c(BREAK_QTR - 0.25, max(d$date)),
+seg_df <- data.frame(
+  xstart = as.Date(c(min(d$Date), as.Date(as.yearqtr(BREAK_QTR)))),
+  xend   = as.Date(c(as.Date(as.yearqtr(BREAK_QTR)) - 90, max(d$Date))),  # ~1 quarter before
   beta   = c(beta_pre, beta_post)
 )
 
@@ -131,13 +149,13 @@ for (s in 1:(n - roll_window + 1L)) {
 
   if (!all(is.finite(sub$ratio_data)) || !all(is.finite(sub$W_over_den)) ||
       var(sub$W_over_den, na.rm = TRUE) <= 0) {
-    rows[[s]] <- tibble::tibble(Date = d$Date[center], beta = NA_real_, se = NA_real_)
+    rows[[s]] <- data.frame(Date = d$Date[center], beta = NA_real_, se = NA_real_)
     next
   }
 
   fit <- try(lm(ratio_data ~ W_over_den, data = sub), silent = TRUE)
   if (inherits(fit, "try-error") || is.na(coef(fit)["W_over_den"])) {
-    rows[[s]] <- tibble::tibble(Date = d$Date[center], beta = NA_real_, se = NA_real_)
+    rows[[s]] <- data.frame(Date = d$Date[center], beta = NA_real_, se = NA_real_)
     next
   }
 
@@ -148,20 +166,20 @@ for (s in 1:(n - roll_window + 1L)) {
   se <- suppressWarnings(sqrt(V["W_over_den","W_over_den"]))
   if (!is.finite(se)) se <- NA_real_
 
-  rows[[s]] <- tibble::tibble(Date = d$Date[center], beta = b, se = se)
+  rows[[s]] <- data.frame(Date = d$Date[center], beta = b, se = se)
 }
 
-roll <- dplyr::bind_rows(rows) %>%
-  mutate(beta_cents = 100 * beta,
-         lo = 100 * (beta - 1.96 * se),
-         hi = 100 * (beta + 1.96 * se)) %>%
-  arrange(Date)
+roll <- do.call(rbind, rows)
+roll$beta_cents <- 100 * roll$beta
+roll$lo <- 100 * (roll$beta - 1.96 * roll$se)
+roll$hi <- 100 * (roll$beta + 1.96 * roll$se)
 
-# Build datasets: line uses finite betas; ribbon uses finite lo/hi
-roll_line <- roll %>% filter(is.finite(beta_cents))
-roll_band <- roll %>% filter(is.finite(lo), is.finite(hi))
+roll_line <- subset(roll, is.finite(beta_cents))
+roll_band <- subset(roll, is.finite(lo) & is.finite(hi))
 
-# Plot (CI ribbon added only when valid)
+# "Nice" y-limits for rolling chart (keep your canonical 2.5–3.5 if you prefer)
+ylims_roll <- nice_limits(c(roll_line$beta_cents, roll_band$lo, roll_band$hi), lower = 2.5, upper = 3.5)
+
 fig2 <- ggplot() +
   { if (nrow(roll_band) > 0)
       geom_ribbon(data = roll_band,
@@ -171,15 +189,19 @@ fig2 <- ggplot() +
   geom_line(data = roll_line, aes(x = Date, y = beta_cents),
             color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
   geom_segment(data = seg_df,
-               aes(x = as.Date(xstart), xend = as.Date(xend),
-                   y = 100*beta, yend = 100*beta),
+               aes(x = xstart, xend = xend, y = 100*beta, yend = 100*beta),
                inherit.aes = FALSE,
                linetype = "dashed", color = "black", linewidth = 0.9) +
-  scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
+  scale_y_continuous("Cents", limits = ylims_roll, expand = expansion(mult = c(0,0)),
+                     breaks = seq(floor(ylims_roll[1]*10)/10, ceiling(ylims_roll[2]*10)/10, by = 0.2)) +
   labs(title = "Figure 2. The Propensity to Consume out of Wealth (Rolling 10-year MPC)",
        x = NULL) +
   theme_minimal(base_size = 12) +
-  theme(panel.grid = element_blank())
+  theme(
+    panel.grid   = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    plot.background = element_blank()
+  )
 
 print(fig2)
 # ================================================================
