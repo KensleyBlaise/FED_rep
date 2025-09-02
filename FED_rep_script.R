@@ -1,17 +1,16 @@
 # ================================================================
-# FED_rep.xlsx (Sheet29) -> Figure 1 (full vs no-COVID) + Figure 2
-# Y & C already real; T & W deflated by Cons Deflator.
-# Figure 2 uses rolling 40q with Newey–West CIs (robust fallback).
-# No gridlines. No saving.
+# FED_rep.xlsx (Sheet29) -> Figure 1 (Full vs No-COVID) + Figure 2 (Rolling MPC w/ CI)
+# Y & C already real; deflate only Gov benefits and Ill wealth by Cons Deflator
+# Faceted Figure 1 (side-by-side) without extra packages; robust CI ribbon in Figure 2
 # ================================================================
 suppressPackageStartupMessages({
   library(readxl)
   library(dplyr)
+  library(tidyr)
   library(ggplot2)
   library(zoo)        # as.yearqtr
-  library(slider)     # rolling windows
-  library(sandwich)   # NeweyWest(), vcovHC()
-  library(lmtest)
+  library(sandwich)   # NeweyWest(), vcov()
+  library(lmtest)     # (not strictly needed here, but handy)
 })
 
 # ---------------- CONFIG ----------------
@@ -22,7 +21,7 @@ COVID_START <- zoo::as.yearqtr("2020 Q1")
 COVID_END   <- zoo::as.yearqtr("2021 Q4")
 
 # Exact column names in your sheet
-COL_Q <- "Q"              # quarter like "Mar-00"
+COL_Q <- "Q"              # e.g. "Mar-00"
 COL_Y <- "Real income"    # already real
 COL_C <- "Real Cons"      # already real
 COL_T <- "Gov benefits"   # nominal -> deflate
@@ -36,11 +35,11 @@ names(raw) <- trimws(names(raw))
 d <- raw %>%
   transmute(
     Q        = .data[[COL_Q]],
-    Y_real   = as.numeric(.data[[COL_Y]]),   # already real
-    C_real   = as.numeric(.data[[COL_C]]),   # already real
-    T_nom    = as.numeric(.data[[COL_T]]),   # nominal
-    W_nom    = as.numeric(.data[[COL_W]]),   # nominal
-    P        = as.numeric(.data[[COL_P]])    # deflator
+    Y_real   = as.numeric(.data[[COL_Y]]),
+    C_real   = as.numeric(.data[[COL_C]]),
+    T_nom    = as.numeric(.data[[COL_T]]),
+    W_nom    = as.numeric(.data[[COL_W]]),
+    P        = as.numeric(.data[[COL_P]])
   )
 
 # Parse quarters like "Mar-00" (fallback to "Mar-2000")
@@ -48,13 +47,10 @@ d$date <- suppressWarnings(zoo::as.yearqtr(d$Q, format = "%b-%y"))
 if (any(is.na(d$date))) d$date <- suppressWarnings(zoo::as.yearqtr(d$Q, format = "%b-%Y"))
 d$Date <- as.Date(d$date)
 
-# Normalize deflator if it's on a 100=base scale (e.g., 95 → 0.95)
-if (mean(d$P, na.rm = TRUE) > 5) {
-  message("Rescaling deflator by /100 (100=base scale detected).")
-  d$P <- d$P / 100
-}
+# Normalize deflator if on 100=base scale (e.g., 95 -> 0.95)
+if (mean(d$P, na.rm = TRUE) > 5) d$P <- d$P / 100
 
-# Make T & W real; build regression variables
+# Deflate ONLY transfers & wealth; build regression variables
 to_real <- function(nom, p) nom / p
 d <- d %>%
   mutate(
@@ -68,62 +64,56 @@ d <- d %>%
   filter(is.finite(ratio_data), is.finite(W_over_den)) %>%
   arrange(Date)
 
-# ---------------- helpers for Figure 1 ----------------
-build_fig1_data <- function(df) {
+# ---------------- Figure 1 (faceted: Full vs Excluding COVID) ----------------
+# Helper to fit Eq(1) & attach predictions
+fit_eq1 <- function(df) {
   ols1 <- lm(ratio_data ~ W_over_den, data = df)
   df$ratio_pred <- as.numeric(predict(ols1, newdata = df))
   df <- df %>%
     mutate(post = as.integer(date >= BREAK_QTR),
-           post_W = post * W_over_den)
+           post_W = post * W_over_den))
   ols2 <- lm(ratio_data ~ W_over_den + post + post_W, data = df)
   df$ratio_pred_break <- as.numeric(predict(ols2, newdata = df))
-  list(df = df, ols1 = ols1, ols2 = ols2)
+  df
 }
 
-make_fig1_plot <- function(df, title, ylims = NULL) {
-  p <- ggplot(df, aes(x = Date)) +
-    geom_line(aes(y = ratio_data, colour = "Data"), linewidth = 1) +
-    geom_line(aes(y = ratio_pred, colour = "Predicted"),
-              linewidth = 1, linetype = "dotted") +
-    geom_line(aes(y = ratio_pred_break, colour = "Predicted with Trend Break"),
-              linewidth = 1, linetype = "dashed") +
-    scale_colour_manual(values = c("Data" = "black",
-                                   "Predicted" = "#2C7FB8",
-                                   "Predicted with Trend Break" = "#D95F02")) +
-    labs(title = title, y = "Ratio", x = NULL, colour = "") +
-    theme_minimal(base_size = 12) +
-    theme(panel.grid = element_blank())
-  if (!is.null(ylims)) p <- p + coord_cartesian(ylim = ylims)
-  p
-}
+d_full  <- fit_eq1(d) %>% mutate(Sample = "Full sample")
+d_nc    <- d %>% filter(date < COVID_START | date > COVID_END) %>% fit_eq1() %>% mutate(Sample = "Excluding COVID (2020Q1–2021Q4)")
 
-# ---------------- Figure 1: full sample ----------------
-full <- build_fig1_data(d)
-d_full <- full$df
+# Stack and pivot to long for faceting
+fig1_df <- bind_rows(d_full, d_nc) %>%
+  select(Sample, Date, ratio_data, ratio_pred, ratio_pred_break) %>%
+  pivot_longer(cols = c(ratio_data, ratio_pred, ratio_pred_break),
+               names_to = "Series", values_to = "Value") %>%
+  mutate(Series = recode(Series,
+                         ratio_data = "Data",
+                         ratio_pred = "Predicted",
+                         ratio_pred_break = "Predicted with Trend Break"),
+         Series = factor(Series, levels = c("Data","Predicted","Predicted with Trend Break")),
+         Sample = factor(Sample, levels = c("Full sample","Excluding COVID (2020Q1–2021Q4)")))
 
-# ---------------- Figure 1b: excluding COVID (2020Q1–2021Q4) ----------------
-d_nocovid <- d %>% filter(date < COVID_START | date > COVID_END)
-nocovid <- build_fig1_data(d_nocovid)
-d_nc <- nocovid$df
+# Common y-limits across facets for comparability
+ylims <- range(fig1_df$Value, na.rm = TRUE)
 
-# Identical y-limits for comparability
-ylims <- range(
-  d_full$ratio_data, d_full$ratio_pred, d_full$ratio_pred_break,
-  d_nc$ratio_data,   d_nc$ratio_pred,   d_nc$ratio_pred_break,
-  na.rm = TRUE
-)
+fig1 <- ggplot(fig1_df, aes(x = Date, y = Value, colour = Series, linetype = Series)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ Sample, ncol = 2, scales = "fixed") +
+  scale_colour_manual(values = c("Data"="black", "Predicted"="#2C7FB8", "Predicted with Trend Break"="#D95F02")) +
+  scale_linetype_manual(values = c("Data"="solid", "Predicted"="dotted", "Predicted with Trend Break"="dashed")) +
+  coord_cartesian(ylim = ylims) +
+  labs(title = "Figure 1. The consumption-to-income ratio",
+       x = NULL, y = "Ratio", colour = NULL, linetype = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        legend.position = "bottom")
 
-# Side-by-side panels (no extra packages)
-par(mfrow = c(1, 2))
-print(make_fig1_plot(d_full, "Full Sample", ylims))
-print(make_fig1_plot(d_nc,   "Excluding COVID (2020Q1–2021Q4)", ylims))
-par(mfrow = c(1, 1))  # reset
+print(fig1)
 
-# ---------------- Figure 2: Rolling 10-year MPC with CI band ------------------
-# Pre/post MPC from full-sample break model
-bhat <- coef(full$ols2)
+# ---------------- Figure 2: Rolling 40-quarter MPC with CI -------------------
+# Pre/post MPC levels from full-sample break fit
+bhat <- coef(lm(ratio_data ~ W_over_den + post + post * W_over_den, data = d_full))
 beta_pre  <- unname(bhat["W_over_den"])
-beta_post <- beta_pre + unname(bhat["post_W"])
+beta_post <- beta_pre + unname(bhat["post:W_over_den"])  # interaction term name in base R uses ":" 
 
 seg_df <- tibble::tibble(
   xstart = c(min(d$date), BREAK_QTR),
@@ -131,42 +121,57 @@ seg_df <- tibble::tibble(
   beta   = c(beta_pre, beta_post)
 )
 
-# Rolling 40-quarter β with Newey–West SEs (fallback to OLS SEs per window)
-NW_LAG <- 4  # 1 year of lags; change if you want
-roll <- slider::slide_index_dfr(
-  .x = d, .i = d$date,
-  .before = 20, .after = 19,   # centered 40q window
-  .f = ~{
-    if (nrow(.x) < 40) {
-      tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)], beta = NA_real_, se = NA_real_)
-    } else {
-      m <- lm(ratio_data ~ W_over_den, data = .x)
-      # beta
-      b <- as.numeric(coef(m)["W_over_den"])
-      # Newey-West SE (fallback to classical if NW fails)
-      V <- try(sandwich::NeweyWest(m, lag = NW_LAG, prewhite = FALSE, adjust = TRUE),
-               silent = TRUE)
-      if (inherits(V, "try-error") || is.null(dim(V)) || any(!is.finite(diag(V)))) {
-        V <- vcov(m)
-      }
-      se <- suppressWarnings(sqrt(V["W_over_den","W_over_den"]))
-      if (!is.finite(se)) se <- NA_real_
-      tibble::tibble(date = .x$date[ceiling(nrow(.x)/2)], beta = b, se = se)
-    }
+# Rolling 40q (centered) with Newey–West SEs; fallback to OLS SEs if needed
+roll_window <- 40L
+n <- nrow(d)
+if (n < roll_window) stop("Need at least 40 quarters for rolling window; found: ", n)
+
+rows <- list()
+for (s in 1:(n - roll_window + 1)) {
+  e <- s + roll_window - 1L
+  center <- s + 19L  # centered index for 40q (20 before, 19 after)
+  sub <- d[s:e, , drop = FALSE]
+
+  # Require some variation in regressor
+  if (!all(is.finite(sub$ratio_data)) || !all(is.finite(sub$W_over_den)) ||
+      var(sub$W_over_den, na.rm = TRUE) <= 0) {
+    rows[[length(rows)+1]] <- tibble::tibble(Date = d$Date[center], beta = NA_real_, se = NA_real_)
+    next
   }
-) %>%
+
+  fit <- try(lm(ratio_data ~ W_over_den, data = sub), silent = TRUE)
+  if (inherits(fit, "try-error") || is.na(coef(fit)["W_over_den"])) {
+    rows[[length(rows)+1]] <- tibble::tibble(Date = d$Date[center], beta = NA_real_, se = NA_real_)
+    next
+  }
+
+  b <- as.numeric(coef(fit)["W_over_den"])
+  # Newey–West covariance (1 year of lags); fallback to classical if NW misbehaves
+  V <- try(sandwich::NeweyWest(fit, lag = 4, prewhite = FALSE, adjust = TRUE), silent = TRUE)
+  if (inherits(V, "try-error") || !is.matrix(V) || any(!is.finite(diag(V)))) V <- vcov(fit)
+  se <- suppressWarnings(sqrt(V["W_over_den","W_over_den"]))
+  if (!is.finite(se)) se <- NA_real_
+
+  rows[[length(rows)+1]] <- tibble::tibble(Date = d$Date[center], beta = b, se = se)
+}
+
+roll <- bind_rows(rows) %>%
   mutate(beta_cents = 100 * beta,
          lo = 100 * (beta - 1.96 * se),
-         hi = 100 * (beta + 1.96 * se),
-         Date = as.Date(date)) %>%
+         hi = 100 * (beta + 1.96 * se)) %>%
   arrange(Date)
 
-# Keep only rows that can draw a ribbon; line can use all finite betas
-roll_line  <- dplyr::filter(roll, is.finite(beta_cents))
-roll_band  <- dplyr::filter(roll, is.finite(lo), is.finite(hi), is.finite(Date))
+# Build datasets: line uses finite betas; ribbon uses finite lo/hi
+roll_line <- roll %>% filter(is.finite(beta_cents))
+roll_band <- roll %>% filter(is.finite(lo), is.finite(hi))
 
-# Build the plot (band only if we have valid rows)
+# Plot (CI ribbon added only when valid)
 fig2 <- ggplot() +
+  { if (nrow(roll_band) > 0)
+      geom_ribbon(data = roll_band,
+                  aes(x = Date, ymin = lo, ymax = hi),
+                  inherit.aes = FALSE,
+                  fill = "#FB9A99", alpha = 0.35) } +
   geom_line(data = roll_line, aes(x = Date, y = beta_cents),
             color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
   geom_segment(data = seg_df,
@@ -174,19 +179,10 @@ fig2 <- ggplot() +
                    y = 100*beta, yend = 100*beta),
                inherit.aes = FALSE, linetype = "dashed", color = "black", linewidth = 0.9) +
   scale_y_continuous("Cents", limits = c(2.5, 3.5), breaks = seq(2.5, 3.5, 0.2)) +
-  labs(title = "Figure 2. Rolling 10-year MPC (Newey–West 95% CI)", x = NULL) +
+  labs(title = "Figure 2. The Propensity to Consume out of Wealth (Rolling 10-year MPC)",
+       x = NULL) +
   theme_minimal(base_size = 12) +
   theme(panel.grid = element_blank())
-
-if (nrow(roll_band) > 0) {
-  fig2 <- fig2 +
-    geom_ribbon(data = roll_band,
-                aes(x = Date, ymin = lo, ymax = hi),
-                inherit.aes = FALSE,
-                fill = "#FB9A99", alpha = 0.35, na.rm = TRUE)
-} else {
-  warning("CI band skipped: no valid lo/hi rows after filtering. Line is shown.")
-}
 
 print(fig2)
 # ================================================================
