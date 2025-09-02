@@ -1,15 +1,14 @@
 # ================================================================
-# FED_rep.xlsx (Sheet29) -> Figure 1 (Full vs No-COVID) + Figure 2 (Rolling MPC w/ CI)
+# FED_rep.xlsx (Sheet29) -> Fig 1 (Full vs No-COVID) + Fig 2 (Rolling OLS with CI)
 # Y & C already real; deflate only Gov benefits and Ill wealth by Cons Deflator
-# Adds panel borders and "nice" axis bounds; COVID panel starts at 0.8
+# Rolling = simple OLS per window; store beta & OLS SE; plot line + 95% CI band
+# No gridlines, black panel borders; COVID panel y-axis starts at 0.8
 # ================================================================
 suppressPackageStartupMessages({
   library(readxl)
   library(dplyr)
   library(ggplot2)
-  library(zoo)        # as.yearqtr
-  library(sandwich)   # NeweyWest(), vcov()
-  library(lmtest)
+  library(zoo)       # as.yearqtr
 })
 
 # ---------------- CONFIG ----------------
@@ -18,6 +17,7 @@ SHEET       <- "Sheet29"
 BREAK_QTR   <- zoo::as.yearqtr("2012 Q1")
 COVID_START <- zoo::as.yearqtr("2020 Q1")
 COVID_END   <- zoo::as.yearqtr("2021 Q4")
+ROLL_WIN    <- 40L   # quarters (≈10 years), even window
 
 # Exact column names in your sheet
 COL_Q <- "Q"              # e.g. "Mar-00"
@@ -66,11 +66,8 @@ d <- d %>%
 # ---------- helper: "nice" y-limits with small padding ----------
 nice_limits <- function(vals, lower = NULL, upper = NULL, pad_mult = 0.04, digits = 2) {
   vals <- vals[is.finite(vals)]
-  r <- range(vals, na.rm = TRUE)
-  span <- max(r[2] - r[1], 1e-9)
-  pad  <- pad_mult * span
-  lo <- r[1] - pad
-  hi <- r[2] + pad
+  r <- range(vals, na.rm = TRUE); span <- max(r[2] - r[1], 1e-9); pad <- pad_mult * span
+  lo <- r[1] - pad; hi <- r[2] + pad
   if (!is.null(lower)) lo <- max(lower, lo)
   if (!is.null(upper)) hi <- min(upper, hi)
   lo <- floor(lo * 10^digits) / 10^digits
@@ -78,7 +75,7 @@ nice_limits <- function(vals, lower = NULL, upper = NULL, pad_mult = 0.04, digit
   c(lo, hi)
 }
 
-# ---------------- Helpers for Figure 1 ----------------
+# ---------------- Helpers for Figure 1 (baseline & break) ----------------
 build_fig1_data <- function(df) {
   ols1 <- lm(ratio_data ~ W_over_den, data = df)
   df$ratio_pred <- as.numeric(predict(ols1, newdata = df))
@@ -124,29 +121,29 @@ print(make_fig1_plot(d_full, "Full Sample", ylims_full))
 print(make_fig1_plot(d_nc,   "Excluding COVID (2020Q1–2021Q4)", ylims_nc))
 par(mfrow = c(1, 1))  # reset
 
-# ---------------- Figure 2: Rolling 40-quarter MPC with CI -------------------
-# Pre/post MPC levels from full-sample break fit
-bhat <- coef(full$ols2)
-beta_pre  <- unname(bhat["W_over_den"])
-beta_post <- beta_pre + unname(bhat["post_W"])
+# ---------------- Figure 2: Rolling OLS (store beta & OLS SE) -----------------
+# Pre/post MPC reference levels from full-sample break fit
+co <- coef(full$ols2)
+beta_pre  <- unname(co["W_over_den"])
+delta_name <- if ("W_over_den:post" %in% names(co)) "W_over_den:post" else "post_W"
+beta_post <- beta_pre + unname(co[delta_name])
 
 seg_df <- data.frame(
   xstart = as.Date(c(min(d$Date), as.Date(as.yearqtr(BREAK_QTR)))),
-  xend   = as.Date(c(as.Date(as.yearqtr(BREAK_QTR)) - 90, max(d$Date))),  # ~1 quarter before
+  xend   = as.Date(c(as.Date(as.yearqtr(BREAK_QTR)) - 90, max(d$Date))),  # ~one quarter earlier
   beta   = c(beta_pre, beta_post)
 )
 
-# Rolling 40q (centered) with Newey–West SEs; fallback to OLS SEs if needed
-roll_window <- 40L
+# Simple rolling OLS engine (centered window)
+if (nrow(d) < ROLL_WIN) stop("Need at least ", ROLL_WIN, " quarters; found: ", nrow(d))
 n <- nrow(d)
-if (n < roll_window) stop("Need at least 40 quarters for rolling window; found: ", n)
-
-rows <- vector("list", length = n - roll_window + 1L)
-for (s in 1:(n - roll_window + 1L)) {
-  e <- s + roll_window - 1L
-  center <- s + 19L           # centered index for 40q (20 before, 19 after)
+rows <- vector("list", length = n - ROLL_WIN + 1L)
+for (s in 1:(n - ROLL_WIN + 1L)) {
+  e <- s + ROLL_WIN - 1L
+  center <- s + (ROLL_WIN/2 - 1L)  # for 40: s+19
   sub <- d[s:e, , drop = FALSE]
 
+  # Skip windows without variation or with NAs
   if (!all(is.finite(sub$ratio_data)) || !all(is.finite(sub$W_over_den)) ||
       var(sub$W_over_den, na.rm = TRUE) <= 0) {
     rows[[s]] <- data.frame(Date = d$Date[center], beta = NA_real_, se = NA_real_)
@@ -159,49 +156,18 @@ for (s in 1:(n - roll_window + 1L)) {
     next
   }
 
-  b <- as.numeric(coef(fit)["W_over_den"])
-  # Newey–West covariance (1-year lag); fallback to classical
-  V <- try(sandwich::NeweyWest(fit, lag = 4, prewhite = FALSE, adjust = TRUE), silent = TRUE)
-  if (inherits(V, "try-error") || !is.matrix(V) || any(!is.finite(diag(V)))) V <- vcov(fit)
-  se <- suppressWarnings(sqrt(V["W_over_den","W_over_den"]))
+  b  <- as.numeric(coef(fit)["W_over_den"])
+  se <- tryCatch(
+    summary(fit)$coef["W_over_den", "Std. Error"],
+    error = function(e) NA_real_
+  )
+  if (!is.finite(b))  b  <- NA_real_
   if (!is.finite(se)) se <- NA_real_
 
   rows[[s]] <- data.frame(Date = d$Date[center], beta = b, se = se)
 }
 
-roll <- do.call(rbind, rows)
-roll$beta_cents <- 100 * roll$beta
-roll$lo <- 100 * (roll$beta - 1.96 * roll$se)
-roll$hi <- 100 * (roll$beta + 1.96 * roll$se)
-
-roll_line <- subset(roll, is.finite(beta_cents))
-roll_band <- subset(roll, is.finite(lo) & is.finite(hi))
-
-# "Nice" y-limits for rolling chart (keep your canonical 2.5–3.5 if you prefer)
-ylims_roll <- nice_limits(c(roll_line$beta_cents, roll_band$lo, roll_band$hi), lower = 2.5, upper = 3.5)
-
-fig2 <- ggplot() +
-  { if (nrow(roll_band) > 0)
-      geom_ribbon(data = roll_band,
-                  aes(x = Date, ymin = lo, ymax = hi),
-                  inherit.aes = FALSE,
-                  fill = "#FB9A99", alpha = 0.35) } +
-  geom_line(data = roll_line, aes(x = Date, y = beta_cents),
-            color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
-  geom_segment(data = seg_df,
-               aes(x = xstart, xend = xend, y = 100*beta, yend = 100*beta),
-               inherit.aes = FALSE,
-               linetype = "dashed", color = "black", linewidth = 0.9) +
-  scale_y_continuous("Cents", limits = ylims_roll, expand = expansion(mult = c(0,0)),
-                     breaks = seq(floor(ylims_roll[1]*10)/10, ceiling(ylims_roll[2]*10)/10, by = 0.2)) +
-  labs(title = "Figure 2. The Propensity to Consume out of Wealth (Rolling 10-year MPC)",
-       x = NULL) +
-  theme_minimal(base_size = 12) +
-  theme(
-    panel.grid   = element_blank(),
-    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
-    plot.background = element_blank()
-  )
-
-print(fig2)
-# ================================================================
+roll <- do.call(rbind, rows) %>%
+  mutate(
+    beta_cents = 100 * beta,
+    lo = 100 * (beta - 1.*
