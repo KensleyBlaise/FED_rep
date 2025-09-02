@@ -170,4 +170,36 @@ for (s in 1:(n - ROLL_WIN + 1L)) {
 roll <- do.call(rbind, rows) %>%
   mutate(
     beta_cents = 100 * beta,
-    lo = 100 * (beta - 1.*
+    lo = 100 * (beta - 1.96 * se),
+    hi = 100 * (beta + 1.96 * se)
+  )
+
+# Build datasets: line uses finite betas; ribbon uses finite lo/hi
+roll_line <- subset(roll, is.finite(beta_cents))
+roll_band <- subset(roll, is.finite(lo) & is.finite(hi))
+
+# "Nice" y-limits for rolling chart (classic paper range 2.5–3.5)
+ylims_roll <- c(2.5, 3.5)
+
+fig2 <- ggplot() +
+  { if (nrow(roll_band) > 0)
+      geom_ribbon(data = roll_band,
+                  aes(x = Date, ymin = lo, ymax = hi),
+                  inherit.aes = FALSE,
+                  fill = "#FB9A99", alpha = 0.35) } +
+  geom_line(data = roll_line, aes(x = Date, y = beta_cents),
+            color = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
+  geom_segment(data = seg_df,
+               aes(x = xstart, xend = xend, y = 100*beta, yend = 100*beta),
+               inherit.aes = FALSE, linetype = "dashed", color = "black", linewidth = 0.9) +
+  scale_y_continuous("Cents", limits = ylims_roll, breaks = seq(2.5, 3.5, 0.2), expand = expansion(mult = c(0,0))) +
+  labs(title = "Figure 2. Rolling 10-year MPC (OLS 95% CI)", x = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid   = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    plot.background = element_blank()
+  )
+
+print(fig2)
+# ================================================================
