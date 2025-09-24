@@ -203,3 +203,183 @@ fig2 <- ggplot() +
 
 print(fig2)
 # ================================================================
+
+# ===================== UNDERLYING ANALYSIS — STANDALONE BLOCK (AUGMENTED) =====================
+# Reuses objects/functions created earlier in your script:
+# high_freq_ts, mgdp_ts, gdpts, time_vector, QQ, Q, lags_xhf, STW, rest_oftime, dates, time_length, results_filepath
+# mix_data(), u_midas_q_pred(), crps(), quant_comb_TV_w(), format_quantile_df(), format_weights_df()
+# ---------------------------------------------------------------------------------------------
+
+# -------------------- 0) Setup --------------------
+P_vars <- c('housing','labour','output','futureoutput','neworders')  # persistent block
+T_vars <- c('risk','uncertainty','retail')                           # transitory block
+
+scale_one_sided <- function(zm) {
+  m <- apply(zm, 2, function(x) mean(x, na.rm = TRUE))
+  s <- apply(zm, 2, function(x) sd(x,   na.rm = TRUE))
+  s[s == 0 | is.na(s)] <- 1
+  sweep(sweep(zm, 2, m, "-"), 2, s, "/")
+}
+
+# Storage
+y_u_P2   <- array(NA, dim = c(rest_oftime, Q))  # UNDERLYING (persistent factor) forecasts
+y_u_T2   <- array(NA, dim = c(rest_oftime, Q))  # Transitory factor forecasts
+qsc_u_P2 <- array(NA, dim = c(rest_oftime, Q))  # CRPS for TV weights
+qsc_u_T2 <- array(NA, dim = c(rest_oftime, Q))
+kcomb_PT_w2 <- array(NA, dim = c(2, Q, rest_oftime))  # weights: [P,T] × τ × time
+kcomb_PT_y2 <- array(NA, dim = c(rest_oftime, Q))     # factor-based headline
+
+# -------------------- 1) Factor-split MIDAS (separate from your original loop) --------------------
+for (f2 in STW:length(time_vector[,1])) {
+
+  # --- 1.1 Quarterly GDP history up to current quarter end (no look-ahead)
+  time_q <- c(as.numeric(time_vector[f2,1]), (as.numeric(time_vector[f2,2]) %/% 3))
+  if (time_q[2]==0){
+    gdpts_n <- window(gdpts, start=start(gdpts), end=c(as.numeric(time_vector[f2,1])-1, 4))
+    gdpts_clean <- ts(gdpts_n[!is.na(gdpts_n)], end=c(as.numeric(time_vector[f2,1])-1, 4), frequency=4)
+  } else if (time_q[2]==1){
+    gdpts_n <- window(gdpts, start=start(gdpts), end=c(as.numeric(time_vector[f2,1]), 1))
+    gdpts_clean <- ts(gdpts_n[!is.na(gdpts_n)], end=c(as.numeric(time_vector[f2,1]), 1), frequency=4)
+  } else if (time_q[2]==2){
+    gdpts_n <- window(gdpts, start=start(gdpts), end=c(as.numeric(time_vector[f2,1]), 2))
+    gdpts_clean <- ts(gdpts_n[!is.na(gdpts_n)], end=c(as.numeric(time_vector[f2,1]), 2), frequency=4)
+  } else {
+    gdpts_n <- window(gdpts, start=start(gdpts), end=c(as.numeric(time_vector[f2,1]), 3))
+    gdpts_clean <- ts(gdpts_n[!is.na(gdpts_n)], end=c(as.numeric(time_vector[f2,1]), 3), frequency=4)
+  }
+
+  # --- 1.2 Monthly panels up to f2-1 (avoid look-ahead from current month)
+  hf_end   <- time_vector[f2-1,]
+  hf_full  <- window(high_freq_ts, start=start(high_freq_ts), end=hf_end)
+  mgdp_fac <- window(mgdp_ts,      start=start(mgdp_ts),      end=hf_end)
+
+  # Keep required columns, align with mgdp, and balance panel
+  hf_keep_names <- colnames(hf_full)[colnames(hf_full) %in% c(P_vars, T_vars)]
+  if (length(hf_keep_names) == 0) next
+
+  hf_z   <- as.zoo(hf_full[, hf_keep_names, drop=FALSE])
+  mgdp_z <- as.zoo(mgdp_fac); colnames(mgdp_z) <- "mgdp"
+  mpanel <- na.omit(merge(hf_z, mgdp_z, all = FALSE))
+  if (NROW(mpanel) < 12) next  # need at least one year of data
+
+  # --- 1.3 Standardise (one-sided) and drop constant columns
+  mp_std <- scale_one_sided(coredata(mpanel))
+  rownames(mp_std) <- index(mpanel)
+  keep_cols <- apply(mp_std, 2, function(x) sd(x, na.rm = TRUE) > 0)
+  mp_std <- mp_std[, keep_cols, drop = FALSE]
+  if (ncol(mp_std) == 0) next
+
+  # --- 1.4 Define blocks and guards
+  P_cols <- intersect(colnames(mp_std), c(P_vars, "mgdp"))
+  T_cols <- intersect(colnames(mp_std), T_vars)
+  if (length(P_cols) < 2 || length(T_cols) < 1) next
+
+  # --- 1.5 PCA factors (PC1 per block)
+  pP <- prcomp(mp_std[, P_cols, drop=FALSE], center=FALSE, scale.=FALSE)
+  pT <- prcomp(mp_std[, T_cols, drop=FALSE], center=FALSE, scale.=FALSE)
+  F_P_scores <- pP$x[,1]
+  F_T_scores <- pT$x[,1]
+
+  # Align persistent factor so that higher = stronger momentum (positive vs 'output' or 'mgdp')
+  align_to <- if ("output" %in% P_cols) mp_std[, "output"] else mp_std[, "mgdp"]
+  sgn <- suppressWarnings(sign(cor(F_P_scores, align_to, use="pairwise.complete.obs")))
+  if (!is.na(sgn) && sgn < 0) F_P_scores <- -F_P_scores
+
+  # --- 1.6 Monthly ts for factors (end at hf_end)
+  first_idx <- as.Date(rownames(mp_std)[1])
+  fy <- as.numeric(format(first_idx, "%Y")); fm <- as.numeric(format(first_idx, "%m"))
+  F_P_ts <- ts(as.numeric(F_P_scores), start=c(fy,fm), frequency=12)
+  F_T_ts <- ts(as.numeric(F_T_scores), start=c(fy,fm), frequency=12)
+  F_P_ts <- window(F_P_ts, end=hf_end)
+  F_T_ts <- window(F_T_ts, end=hf_end)
+
+  # --- 1.7 MIDAS datasets and quantile models (per factor)
+  mix_P <- mix_data(F_P_ts, gdpts_clean, time_vector[f2,])
+  mix_T <- mix_data(F_T_ts, gdpts_clean, time_vector[f2,])
+
+  Umidas_P <- u_midas_q_pred(mix_P$y_p, mix_P$x_p, lags_xhf, QQ)
+  Umidas_T <- u_midas_q_pred(mix_T$y_p, mix_T$x_p, lags_xhf, QQ)
+
+  # Store latest nowcasts (per τ)
+  y_u_P2[f2-STW+1, ] <- tail(Umidas_P$y_hat, 1)
+  y_u_T2[f2-STW+1, ] <- tail(Umidas_T$y_hat, 1)
+
+  # --- 1.8 CRPS for TV weights (mirror your safe evaluation logic)
+  if ((f2 - STW - 2) >= 1) {
+    y_u_P_ev <- y_u_P2[f2-STW-2, ]
+    y_u_T_ev <- y_u_T2[f2-STW-2, ]
+  } else {
+    y_u_P_ev <- tail(Umidas_P$y_hat, 4)[1]
+    y_u_T_ev <- tail(Umidas_T$y_hat, 4)[1]
+  }
+  y_out_fac <- window(gdpts, start=mix_P$end_of_quarter_qev, end=mix_P$end_of_quarter_qev)
+
+  qsc_u_P2[f2-STW+1, ] <- crps(y_u_P_ev, as.numeric(y_out_fac), Q, 2)
+  qsc_u_T2[f2-STW+1, ] <- crps(y_u_T_ev, as.numeric(y_out_fac), Q, 2)
+
+  # --- 1.9 Time-varying quantile weights and factor-based headline
+  q_score_PT <- array(NA, dim=c(f2-STW+1, 2, Q))
+  q_score_PT[1:(f2-STW+1), 1, ] <- qsc_u_P2[1:(f2-STW+1), ]
+  q_score_PT[1:(f2-STW+1), 2, ] <- qsc_u_T2[1:(f2-STW+1), ]
+
+  y_hat_combs_PT <- rbind(y_u_P2[f2-STW+1, ], y_u_T2[f2-STW+1, ])
+  kcomb_PT_TV2 <- quant_comb_TV_w(q_score_PT, y_hat_combs_PT, decay, f2-STW+1)
+
+  kcomb_PT_w2[,,f2-STW+1] <- kcomb_PT_TV2$wq
+  kcomb_PT_y2[f2-STW+1, ] <- kcomb_PT_TV2$y_comb
+}
+
+# -------------------- 2) Format & export (single separate workbook) --------------------
+underlying_P_df <- format_quantile_df(y_u_P2,     time_length, dates)   # persistent factor (UNDERLYING)
+transitory_T_df <- format_quantile_df(y_u_T2,     time_length, dates)   # transitory factor
+headline_PT_df  <- format_quantile_df(kcomb_PT_y2, time_length, dates)  # factor-based headline
+
+# Weights P vs T (by quantile over time)
+factor_weights_df <- format_weights_df(kcomb_PT_w2, time_length, dates)
+colnames(factor_weights_df) <- sub("ind1", "P_underlying", colnames(factor_weights_df))
+colnames(factor_weights_df) <- sub("ind2", "T_transitory", colnames(factor_weights_df))
+
+# --- Contributions per quantile (robust weight extraction) ---
+factor_fcast_list <- lapply(1:length(QQ), function(i) {
+  data.frame(P_underlying = underlying_P_df[[i+1]],
+             T_transitory = transitory_T_df[[i+1]])
+})
+
+factor_weight_slices <- lapply(1:length(QQ), function(i) {
+  # kcomb_PT_w2 dims: 2 × Q × T  -> extract τ=i across time -> 2 × 1 × T
+  wqt_arr <- kcomb_PT_w2[, i, 1:time_length, drop = FALSE]
+  # Convert to T × 2 by applying over 3rd dim (time)
+  wqt <- t(apply(wqt_arr, 3, c))
+  data.frame(P_underlying = wqt[,1], T_transitory = wqt[,2])
+})
+
+factor_contrib_list <- mapply(function(forecast_df, weight_df) {
+  cbind(dates = dates[1:time_length], forecast_df * weight_df)
+}, factor_fcast_list, factor_weight_slices, SIMPLIFY = FALSE)
+
+names(factor_contrib_list) <- c('10th','20th','30th','40th','median','60th','70th','80th','90th')
+
+# Optional sanity check (median): P_contrib + T_contrib == headline_from_PT
+# median_idx <- which(QQ == 0.5)
+# hf_m <- headline_PT_df[[median_idx+1]]
+# chk  <- all.equal(hf_m, factor_contrib_list[[median_idx]][,"P_underlying"] +
+#                         factor_contrib_list[[median_idx]][,"T_transitory"], tolerance=1e-8)
+# print(paste("Contribution identity (median):", chk))
+
+# --- Write separate workbook ---
+openxlsx::write.xlsx(
+  x = c(
+    list(
+      'underlying_P'        = underlying_P_df,
+      'transitory_T'        = transitory_T_df,
+      'headline_from_PT'    = headline_PT_df,
+      'factor_weights'      = factor_weights_df
+    ),
+    factor_contrib_list
+  ),
+  file = paste0(results_filepath, 'underlying_results.xlsx'),
+  overwrite = TRUE
+)
+
+# ===================== END UNDERLYING ANALYSIS — STANDALONE BLOCK (AUGMENTED) =====================
+
