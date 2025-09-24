@@ -214,16 +214,31 @@ print(fig2)
 
 
 
-# ===================== UNDERLYING ANALYSIS — FACTORS (USES time_length) =====================
-# Assumes your script already defined: high_freq_ts, mgdp_ts, gdpts, time_vector, STW,
-# QQ, Q, lags_xhf, decay, dates, time_length, results_filepath
-# and sourced helpers: mix_data(), u_midas_q_pred(), crps(), quant_comb_TV_w(),
-# format_quantile_df(), format_weights_df()
 
-# 0) Config --------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+# ===================== UNDERLYING ANALYSIS — FACTOR SPLIT (SEPARATE BLOCK) =====================
+# Assumes you already have: high_freq_ts, mgdp_ts, gdpts, time_vector, STW,
+# QQ (quantiles), Q (length(QQ)), lags_xhf, decay, dates, time_length, results_filepath
+# And helpers: mix_data(), u_midas_q_pred(), crps(), quant_comb_TV_w(),
+#              format_quantile_df(), format_weights_df()
+
+# Guard (in case Q wasn't defined earlier)
+if (!exists("QQ") || is.null(QQ)) QQ <- c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9)
+if (!exists("Q")  || is.null(Q))  Q  <- length(QQ)
+
+# Config: variable blocks
 P_vars <- c('housing','labour','output','futureoutput','neworders')   # persistent (UNDERLYING)
 T_vars <- c('risk','uncertainty','retail')                            # transitory
 
+# Standardise each column one-sided (no look-ahead)
 scale_one_sided <- function(zm) {
   m <- apply(zm, 2, function(x) mean(x, na.rm = TRUE))
   s <- apply(zm, 2, function(x) sd(x,   na.rm = TRUE))
@@ -231,28 +246,21 @@ scale_one_sided <- function(zm) {
   sweep(sweep(zm, 2, m, "-"), 2, s, "/")
 }
 
-# --- Quantiles guard (fix "Q not found") ---
-if (!exists("QQ") || is.null(QQ)) {
-  QQ <- c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9)
-}
-Q <- length(QQ)
-
-
-# Storage (size by time_length, NOT rest_oftime)
+# Storage sized like your outputs (same monthly horizon)
 y_u_P2      <- array(NA, dim = c(time_length, Q))     # UNDERLYING (persistent factor) nowcasts
 y_u_T2      <- array(NA, dim = c(time_length, Q))     # Transitory factor nowcasts
 qsc_u_P2    <- array(NA, dim = c(time_length, Q))     # CRPS for TV weights
 qsc_u_T2    <- array(NA, dim = c(time_length, Q))
 kcomb_PT_w2 <- array(NA, dim = c(2, Q, time_length))  # weights: [P,T] × τ × t
-kcomb_PT_y2 <- array(NA, dim = c(time_length, Q))     # factor-based headline (P+T with TV weights)
+kcomb_PT_y2 <- array(NA, dim = c(time_length, Q))     # factor-based headline (P+T)
 
-# 1) Run factor-split MIDAS (separate loop, mirrors your timing/NA choices) ----
+# Build factors & run quantile MIDAS (mirrors your timing & NA handling)
 for (f2 in STW:length(time_vector[,1])) {
 
   out_row <- f2 - STW + 1
-  if (out_row > time_length) break  # safety
+  if (out_row > time_length) break
 
-  # --- Quarterly GDP history up to the correct quarter end (no look-ahead)
+  # --- Quarterly GDP up to correct quarter end (no look-ahead) ---
   time_q <- c(as.numeric(time_vector[f2,1]), (as.numeric(time_vector[f2,2]) %/% 3))
   if (time_q[2]==0){
     gdpts_n <- window(gdpts, start=start(gdpts), end=c(as.numeric(time_vector[f2,1])-1, 4))
@@ -268,21 +276,20 @@ for (f2 in STW:length(time_vector[,1])) {
     gdpts_clean <- ts(gdpts_n[!is.na(gdpts_n)], end=c(as.numeric(time_vector[f2,1]), 3), frequency=4)
   }
 
-  # --- Monthly panels up to previous month (f2-1) -> same ragged-edge as yours
+  # --- Monthly panels up to previous month (f2-1); COVID NAs already present ---
   hf_end   <- time_vector[f2-1, ]
   hf_full  <- window(high_freq_ts, start=start(high_freq_ts), end=hf_end)
   mgdp_fac <- window(mgdp_ts,      start=start(mgdp_ts),      end=hf_end)
 
-  # Keep named columns and align with mgdp; COVID NAs are already present
+  # Keep needed columns & align with mgdp; drop rows with any NA (COVID etc.)
   hf_keep <- colnames(hf_full)[colnames(hf_full) %in% c(P_vars, T_vars)]
   if (length(hf_keep) == 0) next
-
   hf_z   <- zoo::as.zoo(hf_full[, hf_keep, drop=FALSE])
   mgdp_z <- zoo::as.zoo(mgdp_fac); colnames(mgdp_z) <- "mgdp"
   mpanel <- na.omit(merge(hf_z, mgdp_z, all = FALSE))
-  if (NROW(mpanel) < 12) next  # need at least 12 months pre-NA
+  if (NROW(mpanel) < 12) next  # need ≥ 12 months
 
-  # Standardise one-sided; drop constant cols
+  # Standardise; drop constant cols
   mp_std <- scale_one_sided(zoo::coredata(mpanel))
   rownames(mp_std) <- zoo::index(mpanel)
   keep_cols <- apply(mp_std, 2, function(x) sd(x, na.rm=TRUE) > 0)
@@ -321,8 +328,8 @@ for (f2 in STW:length(time_vector[,1])) {
   Umidas_T <- u_midas_q_pred(mix_T$y_p, mix_T$x_p, lags_xhf, QQ)
 
   # Store latest nowcasts (per τ)
-  y_u_P2[out_row, ] <- tail(Umidas_P$y_hat, 1)   # UNDERLYING nowcast (persistent factor)
-  y_u_T2[out_row, ] <- tail(Umidas_T$y_hat, 1)   # Transitory factor nowcast
+  y_u_P2[out_row, ] <- tail(Umidas_P$y_hat, 1)   # UNDERLYING nowcast (persistent)
+  y_u_T2[out_row, ] <- tail(Umidas_T$y_hat, 1)   # Transitory
 
   # CRPS for TV weights (same evaluation timing as your pipeline)
   if ((out_row - 2) >= 1) {
@@ -349,7 +356,7 @@ for (f2 in STW:length(time_vector[,1])) {
   kcomb_PT_y2[out_row, ] <- kcomb_PT_TV2$y_comb
 }
 
-# 2) Format & export (separate workbook) ---------------------------------------
+# Format & export underlying results (separate workbook)
 underlying_P_df <- format_quantile_df(y_u_P2,      time_length, dates)   # UNDERLYING (persistent)
 transitory_T_df <- format_quantile_df(y_u_T2,      time_length, dates)   # Transitory
 headline_PT_df  <- format_quantile_df(kcomb_PT_y2, time_length, dates)   # Factor-based headline
@@ -360,13 +367,13 @@ colnames(factor_weights_df) <- sub("ind1", "P_underlying", colnames(factor_weigh
 colnames(factor_weights_df) <- sub("ind2", "T_transitory", colnames(factor_weights_df))
 
 # Contributions per quantile (P/T × weights)
-factor_fcast_list <- lapply(1:length(QQ), function(i) {
+factor_fcast_list <- lapply(seq_along(QQ), function(i) {
   data.frame(P_underlying = underlying_P_df[[i+1]],
              T_transitory = transitory_T_df[[i+1]])
 })
-factor_weight_slices <- lapply(1:length(QQ), function(i) {
-  wqt_arr <- kcomb_PT_w2[, i, 1:time_length, drop = FALSE]      # 2 × 1 × T
-  wqt <- t(apply(wqt_arr, 3, c))                                 # T × 2
+factor_weight_slices <- lapply(seq_along(QQ), function(i) {
+  wqt_arr <- kcomb_PT_w2[, i, 1:time_length, drop = FALSE]  # 2 × 1 × T
+  wqt <- t(apply(wqt_arr, 3, c))                            # T × 2
   data.frame(P_underlying = wqt[,1], T_transitory = wqt[,2])
 })
 factor_contrib_list <- mapply(function(forecast_df, weight_df) {
@@ -387,4 +394,15 @@ openxlsx::write.xlsx(
   file = paste0(results_filepath, 'underlying_results.xlsx'),
   overwrite = TRUE
 )
-# ===================== END UNDERLYING ANALYSIS — FACTORS (USES time_length) =====================
+# ===================== END UNDERLYING ANALYSIS — FACTOR SPLIT =====================
+
+
+
+
+
+
+
+
+
+
+
