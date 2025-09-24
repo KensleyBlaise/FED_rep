@@ -231,6 +231,13 @@ scale_one_sided <- function(zm) {
   sweep(sweep(zm, 2, m, "-"), 2, s, "/")
 }
 
+# --- Quantiles guard (fix "Q not found") ---
+if (!exists("QQ") || is.null(QQ)) {
+  QQ <- c(0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9)
+}
+Q <- length(QQ)
+
+
 # Storage (size by time_length, NOT rest_oftime)
 y_u_P2      <- array(NA, dim = c(time_length, Q))     # UNDERLYING (persistent factor) nowcasts
 y_u_T2      <- array(NA, dim = c(time_length, Q))     # Transitory factor nowcasts
