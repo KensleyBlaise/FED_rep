@@ -181,9 +181,6 @@ print(p)
 
 
 
-
-
-
 # ================================================================
 # FED_rep.xlsx (Sheet29) -> Fig 1 (Full vs No-COVID) + Fig 2 (Rolling OLS with CI)
 # Y & C already real; deflate only Gov benefits and Ill wealth by Cons Deflator
