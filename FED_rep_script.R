@@ -1,4 +1,4 @@
-# ============ Rolling MPC (COVID removed, deflator as-is, zero line + border) ============
+# ============ Rolling MPC (30-quarter window, COVID removed, P as-is) ============
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
 })
@@ -6,7 +6,7 @@ suppressPackageStartupMessages({
 # ---- Config ----
 XLSX_FILE <- "FED_rep.xlsx"
 SHEET     <- "Sheet29"
-ROLL_WIN  <- 40L  # quarters (~10y); change if you like
+ROLL_WIN  <- 30L  # <-- 30 observations (quarters), centered window
 
 # Column names in your sheet (exact)
 COL_Q <- "Q"
@@ -55,13 +55,13 @@ d <- d %>%
 
 stopifnot(nrow(d) >= ROLL_WIN)
 
-# ---- Rolling OLS (centered window): store beta & OLS SE ----
+# ---- Rolling OLS (centered 30q): store beta & OLS SE ----
 n <- nrow(d)
 rows <- vector("list", n - ROLL_WIN + 1L)
 
 for (s in 1:(n - ROLL_WIN + 1L)) {
   e <- s + ROLL_WIN - 1L
-  center <- s + (ROLL_WIN/2 - 1L)          # for 40q: s+19
+  center <- s + (ROLL_WIN/2 - 1L)          # for 30q: s + 14
   sub <- d[s:e, , drop = FALSE]
 
   # skip windows with no variation or NAs
@@ -114,7 +114,7 @@ p <- ggplot() +
                      limits = ylims,
                      breaks = pretty(ylims, n = 6),
                      expand = expansion(mult = c(0,0))) +
-  labs(title = "Rolling 10-year MPC out of Wealth (OLS, 95% CI) — COVID removed",
+  labs(title = "Rolling 30-quarter MPC out of Wealth (OLS, 95% CI) — COVID removed",
        x = NULL) +
   theme_minimal(base_size = 12) +
   theme(panel.grid = element_blank(),
