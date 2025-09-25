@@ -1,4 +1,4 @@
-# ============ Rolling MPC (use deflator as-is; zero line + border) ============
+# ============ Rolling MPC (COVID removed, deflator as-is, zero line + border) ============
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
 })
@@ -6,9 +6,9 @@ suppressPackageStartupMessages({
 # ---- Config ----
 XLSX_FILE <- "FED_rep.xlsx"
 SHEET     <- "Sheet29"
-ROLL_WIN  <- 40L  # quarters (~10y)
+ROLL_WIN  <- 40L  # quarters (~10y); change if you like
 
-# Exact column names in your sheet
+# Column names in your sheet (exact)
 COL_Q <- "Q"
 COL_Y <- "Real income"    # already real
 COL_C <- "Real Cons"      # already real
@@ -16,7 +16,7 @@ COL_T <- "Gov benefits"   # nominal -> deflate
 COL_W <- "Ill wealth"     # nominal -> deflate
 COL_P <- "Cons Deflator"  # deflator (USED AS-IS — NO RESCALE)
 
-# ---- Load & prep ----
+# ---- Load ----
 raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
 names(raw) <- trimws(names(raw))
 
@@ -27,7 +27,7 @@ d <- raw %>%
     C_real   = as.numeric(.data[[COL_C]]),
     T_nom    = as.numeric(.data[[COL_T]]),
     W_nom    = as.numeric(.data[[COL_W]]),
-    P        = as.numeric(.data[[COL_P]])  # used exactly as given
+    P        = as.numeric(.data[[COL_P]])
   )
 
 # Parse quarter labels like "Mar-00" (fallback "Mar-2000")
@@ -35,7 +35,12 @@ d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%y"))
 if (any(is.na(d$date))) d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%Y"))
 d$Date <- as.Date(d$date)
 
-# --- Deflate ONLY transfers & illiquid wealth with P AS-IS ---
+# ---- Remove COVID period ----
+COVID_START <- as.yearqtr("2020 Q1")
+COVID_END   <- as.yearqtr("2021 Q4")
+d <- d %>% filter(date < COVID_START | date > COVID_END)
+
+# ---- Build regression variables (deflator P used AS-IS) ----
 d <- d %>%
   mutate(
     T_real     = T_nom / P,
@@ -59,6 +64,7 @@ for (s in 1:(n - ROLL_WIN + 1L)) {
   center <- s + (ROLL_WIN/2 - 1L)          # for 40q: s+19
   sub <- d[s:e, , drop = FALSE]
 
+  # skip windows with no variation or NAs
   if (!all(is.finite(sub$ratio_data)) || !all(is.finite(sub$W_over_den)) ||
       var(sub$W_over_den, na.rm = TRUE) <= 0) {
     rows[[s]] <- data.frame(Date = d$Date[center], beta = NA_real_, se = NA_real_)
@@ -87,7 +93,7 @@ roll <- do.call(rbind, rows) %>%
 roll_line <- dplyr::filter(roll, is.finite(beta_cents))
 roll_band <- dplyr::filter(roll, is.finite(lo) & is.finite(hi))
 
-# ---- Symmetric y-limits around zero (always shows the 0 line) ----
+# ---- Symmetric y-limits around zero (always show 0 line) ----
 vals <- c(roll_line$beta_cents, roll_band$lo, roll_band$hi, 0)
 vals <- vals[is.finite(vals)]
 rng  <- range(vals); pad <- 0.05 * diff(rng); if (!is.finite(pad)) pad <- 0.1
@@ -108,7 +114,8 @@ p <- ggplot() +
                      limits = ylims,
                      breaks = pretty(ylims, n = 6),
                      expand = expansion(mult = c(0,0))) +
-  labs(title = "Rolling 10-year MPC out of Wealth (OLS, 95% CI)", x = NULL) +
+  labs(title = "Rolling 10-year MPC out of Wealth (OLS, 95% CI) — COVID removed",
+       x = NULL) +
   theme_minimal(base_size = 12) +
   theme(panel.grid = element_blank(),
         panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
