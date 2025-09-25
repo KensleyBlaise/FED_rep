@@ -134,7 +134,7 @@ print(p)
 
 
 
-# ===================== Figure 1 — Data vs Predicted (COVID removed) =====================
+# ===================== Figure 1 — Predicted vs Observed (COVID removed) =====================
 suppressPackageStartupMessages({
   library(readxl)
   library(dplyr)
@@ -152,13 +152,13 @@ COL_Y <- "Real income"     # already real
 COL_C <- "Real Cons"       # already real
 COL_T <- "Gov benefits"    # nominal -> deflate
 COL_W <- "Ill wealth"      # nominal -> deflate
-COL_P <- "Cons Deflator"   # deflator (use AS-IS; no rescale)
+COL_P <- "Cons Deflator"   # deflator (use AS-IS; NO rescale)
 
 COVID_START <- as.yearqtr("2020 Q1")
 COVID_END   <- as.yearqtr("2021 Q4")
 
 # helper for tidy y-limits
-nice_limits <- function(vals, pad_mult = 0.04, digits = 2) {
+nice_limits <- function(vals, pad_mult = 0.04, digits = 3) {
   vals <- vals[is.finite(vals)]
   r <- range(vals, na.rm = TRUE)
   span <- max(r[2] - r[1], 1e-9)
@@ -203,20 +203,32 @@ d <- d %>%
   filter(is.finite(ratio_data), is.finite(W_over_den)) %>%
   arrange(Date)
 
-# --- Figure 1: fit simple OLS and plot Data vs Predicted (no break) ---
+# --- Fit simple OLS and get Predicted (no break) ---
 ols1 <- lm(ratio_data ~ W_over_den, data = d)
 d$ratio_pred <- as.numeric(predict(ols1, newdata = d))
 
 ylims_f1 <- nice_limits(c(d$ratio_data, d$ratio_pred))
 
+# --- Plot: Predicted (dotted, bigger dots) vs Observed data ---
 fig1 <- ggplot(d, aes(x = Date)) +
-  geom_line(aes(y = ratio_data, colour = "Data"), linewidth = 1) +
-  geom_line(aes(y = ratio_pred, colour = "Predicted"),
-            linewidth = 1, linetype = "dotted") +
-  scale_colour_manual(values = c("Data" = "black", "Predicted" = "#2C7FB8")) +
+  geom_line(aes(y = ratio_data, colour = "Data",      linetype = "Data"),      linewidth = 1.1) +
+  geom_line(aes(y = ratio_pred, colour = "Predicted", linetype = "Predicted"),
+            linewidth = 1.8, lineend = "round") +   # thicker -> larger dotted "dots"
+  scale_colour_manual(
+    values = c("Data" = "black", "Predicted" = "#2C7FB8"),
+    breaks = c("Predicted", "Data"),
+    labels = c("Predicted", "Observed data")
+  ) +
+  scale_linetype_manual(
+    values = c("Data" = "solid", "Predicted" = "dotted"),
+    breaks = c("Predicted", "Data"),
+    labels = c("Predicted", "Observed data")
+  ) +
+  guides(colour = guide_legend(title = NULL),
+         linetype = guide_legend(title = NULL)) +
   scale_y_continuous(limits = ylims_f1, expand = expansion(mult = c(0,0))) +
-  labs(title = "Figure 1. Consumption-to-income ratio (COVID removed)",
-       y = "Ratio", x = NULL, colour = NULL) +
+  labs(title = "Figure 1. Predicted vs Observed consumption-to-income ratio (COVID removed)",
+       y = "Ratio", x = NULL) +
   theme_minimal(base_size = 12) +
   theme(
     panel.grid = element_blank(),
