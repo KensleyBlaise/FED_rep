@@ -1,3 +1,189 @@
+# ================== Rolling MPC (no recession shading) ==================
+library(readxl); library(dplyr); library(ggplot2); library(zoo)
+
+# --- Config ---
+XLSX_FILE <- "FED_rep.xlsx"
+SHEET     <- "Sheet29"
+BREAK_QTR <- as.yearqtr("2012 Q1")
+ROLL_WIN  <- 40L                      # 10-year, centered window
+YLIMS     <- c(2.5, 3.5)              # match paper axis (cents)
+
+# Your column names
+COL_Q <- "Q"              # e.g. "Mar-00"
+COL_Y <- "Real income"    # already real
+COL_C <- "Real Cons"      # already real
+COL_T <- "Gov benefits"   # nominal -> deflate
+COL_W <- "Ill wealth"     # nominal -> deflate
+COL_P <- "Cons Deflator"  # deflator
+
+# --- Load & prep ---
+raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
+names(raw) <- trimws(names(raw))
+
+d <- raw %>%
+  transmute(
+    Q        = .data[[COL_Q]],
+    Y_real   = as.numeric(.data[[COL_Y]]),
+    C_real   = as.numeric(.data[[COL_C]]),
+    T_nom    = as.numeric(.data[[COL_T]]),
+    W_nom    = as.numeric(.data[[COL_W]]),
+    P        = as.numeric(.data[[COL_P]])
+  )
+
+# Parse quarters like "Mar-00" (fallback "Mar-2000")
+d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%y"))
+if (any(is.na(d$date))) d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%Y"))
+d$Date <- as.Date(d$date)
+
+# Deflator to 0.xx if needed
+if (mean(d$P, na.rm = TRUE) > 5) d$P <- d$P/100
+
+# Deflate ONLY transfers & wealth; build vars
+d <- d %>%
+  mutate(
+    T_real     = T_nom / P,
+    W_real     = W_nom / P,
+    den        = Y_real - T_real,
+    num        = C_real - T_real,
+    ratio_data = num / den,
+    W_over_den = W_real / den
+  ) %>%
+  filter(is.finite(ratio_data), is.finite(W_over_den)) %>%
+  arrange(Date)
+
+stopifnot(nrow(d) >= ROLL_WIN)
+
+# --- Break model to get pre/post MPC levels ---
+dfb <- d %>% mutate(post = as.integer(date >= BREAK_QTR),
+                    post_W = post * W_over_den)
+m_break  <- lm(ratio_data ~ W_over_den + post + post_W, data = dfb)
+b        <- coef(m_break)
+beta_pre <- unname(b["W_over_den"])
+beta_post <- beta_pre + unname(b["post_W"])
+
+# --- Rolling OLS: store beta & OLS SE for each centered window ---
+n <- nrow(d)
+rows <- vector("list", n - ROLL_WIN + 1L)
+for (s in 1:(n - ROLL_WIN + 1L)) {
+  e <- s + ROLL_WIN - 1L
+  center <- s + (ROLL_WIN/2 - 1L)          # for 40: s+19
+  sub <- d[s:e, , drop = FALSE]
+
+  if (!all(is.finite(sub$ratio_data)) || !all(is.finite(sub$W_over_den)) ||
+      var(sub$W_over_den, na.rm = TRUE) <= 0) {
+    rows[[s]] <- data.frame(Date = d$Date[center], beta = NA_real_, se = NA_real_)
+    next
+  }
+  fit <- lm(ratio_data ~ W_over_den, data = sub)
+  bb  <- as.numeric(coef(fit)["W_over_den"])
+  se  <- summary(fit)$coef["W_over_den","Std. Error"]
+  rows[[s]] <- data.frame(Date = d$Date[center], beta = bb, se = se)
+}
+roll <- do.call(rbind, rows) %>%
+  mutate(beta_cents = 100*beta,
+         lo = 100*(beta - 1.96*se),
+         hi = 100*(beta + 1.96*se)) %>%
+  arrange(Date)
+
+roll_line <- dplyr::filter(roll, is.finite(beta_cents))
+roll_band <- dplyr::filter(roll, is.finite(lo) & is.finite(hi))
+
+# --- Bracket from break model (clipped to y-range to avoid warnings) ---
+x_min <- min(d$Date); x_max <- max(d$Date); x_break <- as.Date(as.yearqtr(BREAK_QTR))
+pad   <- 15  # days to leave a small gap around the break
+
+y_pre  <- 100*beta_pre
+y_post <- 100*(beta_post)
+
+hseg <- data.frame(
+  xstart = c(x_min, x_break + pad),
+  xend   = c(x_break - pad, x_max),
+  y      = c(y_pre, y_post)
+) %>% dplyr::filter(y >= YLIMS[1], y <= YLIMS[2])
+
+# vertical segment clipped to YLIMS
+v_y0 <- max(min(y_pre, y_post), YLIMS[1])
+v_y1 <- min(max(y_pre, y_post), YLIMS[2])
+vseg <- if (v_y1 > v_y0) data.frame(x = x_break, y0 = v_y0, y1 = v_y1) else NULL
+
+# --- Plot (no recession shading) ---
+p <- ggplot() +
+  { if (nrow(roll_band) > 0)
+      geom_ribbon(data = roll_band,
+                  aes(x = Date, ymin = lo, ymax = hi),
+                  fill = "#FB9A99", alpha = 0.35) } +
+  geom_line(data = roll_line,
+            aes(x = Date, y = beta_cents),
+            colour = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
+  { if (nrow(hseg) > 0)
+      geom_segment(data = hseg,
+                   aes(x = xstart, xend = xend, y = y, yend = y),
+                   linetype = "dotted", colour = "black", linewidth = 0.9) } +
+  { if (!is.null(vseg))
+      geom_segment(data = vseg,
+                   aes(x = x, xend = x, y = y0, yend = y1),
+                   linetype = "dotted", colour = "black", linewidth = 0.9) } +
+  scale_y_continuous(NULL, limits = YLIMS, breaks = seq(2.5, 3.5, 0.2),
+                     sec.axis = sec_axis(~., name = "Cents")) +
+  labs(title = "Figure 2. The Propensity to Consume out of Wealth (Rolling 10-year MPC)",
+       x = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        plot.background = element_blank())
+
+print(p)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ================================================================
 # FED_rep.xlsx (Sheet29) -> Fig 1 (Full vs No-COVID) + Fig 2 (Rolling OLS with CI)
 # Y & C already real; deflate only Gov benefits and Ill wealth by Cons Deflator
