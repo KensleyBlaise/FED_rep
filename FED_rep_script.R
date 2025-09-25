@@ -1,4 +1,4 @@
-# ================== Rolling MPC (robust plot, no shading) ==================
+# ================== Figure 2 — Rolling MPC (clean + robust) ==================
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
 })
@@ -7,16 +7,15 @@ suppressPackageStartupMessages({
 XLSX_FILE <- "FED_rep.xlsx"
 SHEET     <- "Sheet29"
 BREAK_QTR <- as.yearqtr("2012 Q1")
-ROLL_WIN  <- 40L
-YLIMS     <- c(2.5, 3.5)     # y-axis range in "cents"
+ROLL_WIN  <- 40L   # 10-year centered window (set 32L for 8y, etc.)
 
-# Your column names
-COL_Q <- "Q"
-COL_Y <- "Real income"     # already real
-COL_C <- "Real Cons"       # already real
-COL_T <- "Gov benefits"    # nominal -> deflate
-COL_W <- "Ill wealth"      # nominal -> deflate
-COL_P <- "Cons Deflator"   # deflator
+# Your column names (exactly as in the sheet)
+COL_Q <- "Q"              # e.g., "Mar-00"
+COL_Y <- "Real income"    # already real
+COL_C <- "Real Cons"      # already real
+COL_T <- "Gov benefits"   # nominal -> deflate
+COL_W <- "Ill wealth"     # nominal -> deflate
+COL_P <- "Cons Deflator"  # deflator
 
 # ---- Load & prepare ----
 raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
@@ -37,10 +36,10 @@ d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%y"))
 if (any(is.na(d$date))) d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%Y"))
 d$Date <- as.Date(d$date)
 
-# Deflator to 0.xx if needed
-if (mean(d$P, na.rm = TRUE) > 5) d$P <- d$P/100
+# Deflator: if it's on a 100=base scale (e.g., 95, 105), scale to 0.xx
+if (mean(d$P, na.rm = TRUE) > 5) d$P <- d$P / 100
 
-# Deflate ONLY transfers & wealth; build regression variables
+# Deflate ONLY transfers & illiquid wealth; build regression variables
 d <- d %>%
   mutate(
     T_real     = T_nom / P,
@@ -55,7 +54,7 @@ d <- d %>%
 
 stopifnot(nrow(d) >= ROLL_WIN)
 
-# ---- Break model (pre/post MPC levels) ----
+# ---- Break model to get pre/post MPC (in ratio units; we'll x100 for "cents") ----
 dfb <- d %>% mutate(post = as.integer(date >= BREAK_QTR),
                     post_W = post * W_over_den)
 m_break  <- lm(ratio_data ~ W_over_den + post + post_W, data = dfb)
@@ -63,62 +62,68 @@ co       <- coef(m_break)
 beta_pre <- unname(co["W_over_den"])
 beta_post <- beta_pre + unname(co["post_W"])
 
-# ---- Rolling OLS (centered window): store beta & OLS SE ----
+# ---- Rolling OLS (centered) — store beta and OLS SE for each window ----
 n <- nrow(d)
 rows <- vector("list", n - ROLL_WIN + 1L)
 for (s in 1:(n - ROLL_WIN + 1L)) {
   e <- s + ROLL_WIN - 1L
-  center <- s + (ROLL_WIN/2 - 1L)      # for 40: s+19
+  center <- s + (ROLL_WIN/2 - 1L)            # for 40q: s+19
   sub <- d[s:e, , drop = FALSE]
 
+  # Skip if no variation or NA
   if (!all(is.finite(sub$ratio_data)) || !all(is.finite(sub$W_over_den)) ||
       var(sub$W_over_den, na.rm = TRUE) <= 0) {
     rows[[s]] <- data.frame(Date = d$Date[center], beta = NA_real_, se = NA_real_)
     next
   }
+
   fit <- lm(ratio_data ~ W_over_den, data = sub)
   b   <- as.numeric(coef(fit)["W_over_den"])
   se  <- summary(fit)$coef["W_over_den", "Std. Error"]
+
   rows[[s]] <- data.frame(Date = d$Date[center],
                           beta = ifelse(is.finite(b), b, NA_real_),
                           se   = ifelse(is.finite(se), se, NA_real_))
 }
-
 roll <- do.call(rbind, rows) %>%
-  mutate(beta_cents = 100*beta,
-         lo = 100*(beta - 1.96*se),
-         hi = 100*(beta + 1.96*se)) %>%
+  mutate(beta_cents = 100 * beta,
+         lo = 100 * (beta - 1.96 * se),
+         hi = 100 * (beta + 1.96 * se)) %>%
   arrange(Date)
 
 roll_line <- dplyr::filter(roll, is.finite(beta_cents))
 roll_band <- dplyr::filter(roll, is.finite(lo) & is.finite(hi))
 
-# ---- Build bracket lines ONLY if finite and within YLIMS ----
+# ---- Dynamic y-limits from the data so nothing is clipped ----
+y_pre  <- 100 * beta_pre
+y_post <- 100 * beta_post
+vals   <- c(roll_line$beta_cents, roll_band$lo, roll_band$hi, y_pre, y_post)
+vals   <- vals[is.finite(vals)]
+ylims  <- range(vals)
+pad    <- 0.05 * diff(ylims)
+if (!is.finite(pad)) pad <- 0.1
+ylims  <- c(ylims[1] - pad, ylims[2] + pad)
+
+# ---- Build the bracket (pre/post levels), clipped to y-limits ----
 x_min   <- min(d$Date); x_max <- max(d$Date)
 x_break <- as.Date(as.yearqtr(BREAK_QTR))
 pad_days <- 15L
 
-y_pre  <- 100*beta_pre
-y_post <- 100*beta_post
-
 hseg <- data.frame(
-  xstart = c(x_min,           x_break + pad_days),
+  xstart = c(x_min,            x_break + pad_days),
   xend   = c(x_break - pad_days, x_max),
   y      = c(y_pre, y_post)
 )
-# keep only those inside y-range and finite
-hseg <- subset(hseg, is.finite(y) & y >= YLIMS[1] & y <= YLIMS[2])
+hseg <- subset(hseg, is.finite(y) & y >= ylims[1] & y <= ylims[2])
 
-# vertical connector only if interval intersects YLIMS
+vseg <- NULL
 if (is.finite(y_pre) && is.finite(y_post)) {
-  v_y0 <- max(min(y_pre, y_post), YLIMS[1])
-  v_y1 <- min(max(y_pre, y_post), YLIMS[2])
-  vseg <- if (v_y1 > v_y0) data.frame(x = x_break, y0 = v_y0, y1 = v_y1) else NULL
-} else {
-  vseg <- NULL
+  v0 <- max(min(y_pre, y_post), ylims[1])
+  v1 <- min(max(y_pre, y_post), ylims[2])
+  if (v1 > v0) vseg <- data.frame(x = x_break, y0 = v0, y1 = v1)
 }
 
-# ---- Plot (no secondary axis, no shading) ----
+# ---- Plot (no recession shading, no secondary axis) ----
 p <- ggplot() +
   { if (nrow(roll_band) > 0)
       geom_ribbon(data = roll_band,
@@ -135,7 +140,9 @@ p <- ggplot() +
       geom_segment(data = vseg,
                    aes(x = x, xend = x, y = y0, yend = y1),
                    linetype = "dotted", colour = "black", linewidth = 0.9) } +
-  scale_y_continuous("Cents", limits = YLIMS, breaks = seq(YLIMS[1], YLIMS[2], by = 0.2),
+  scale_y_continuous("Cents",
+                     limits = ylims,
+                     breaks = pretty(ylims, n = 6),
                      expand = expansion(mult = c(0,0))) +
   labs(title = "Figure 2. Rolling 10-year MPC (OLS 95% CI)", x = NULL) +
   theme_minimal(base_size = 12) +
@@ -143,11 +150,7 @@ p <- ggplot() +
         plot.background = element_blank())
 
 print(p)
-
-# Optional: quick diagnostics if something still looks off
-cat("roll points (finite):", nrow(roll_line),
-    "| CI rows:", nrow(roll_band),
-    "| bracket y_pre,y_post:", y_pre, y_post, "\n")
+# ======================================================================
 
 
 
