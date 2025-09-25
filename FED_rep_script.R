@@ -134,6 +134,112 @@ print(p)
 
 
 
+# ===================== Figure 1 — Data vs Predicted (COVID removed) =====================
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(ggplot2)
+  library(zoo)     # as.yearqtr
+})
+
+# --- Config ---
+XLSX_FILE <- "FED_rep.xlsx"
+SHEET     <- "Sheet29"
+
+# Exact column names in your sheet
+COL_Q <- "Q"               # e.g., "Mar-00"
+COL_Y <- "Real income"     # already real
+COL_C <- "Real Cons"       # already real
+COL_T <- "Gov benefits"    # nominal -> deflate
+COL_W <- "Ill wealth"      # nominal -> deflate
+COL_P <- "Cons Deflator"   # deflator (use AS-IS; no rescale)
+
+COVID_START <- as.yearqtr("2020 Q1")
+COVID_END   <- as.yearqtr("2021 Q4")
+
+# helper for tidy y-limits
+nice_limits <- function(vals, pad_mult = 0.04, digits = 2) {
+  vals <- vals[is.finite(vals)]
+  r <- range(vals, na.rm = TRUE)
+  span <- max(r[2] - r[1], 1e-9)
+  pad <- pad_mult * span
+  lo <- floor((r[1] - pad) * 10^digits) / 10^digits
+  hi <- ceiling((r[2] + pad) * 10^digits) / 10^digits
+  c(lo, hi)
+}
+
+# --- Load & prep ---
+raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
+names(raw) <- trimws(names(raw))
+
+d <- raw %>%
+  transmute(
+    Q        = .data[[COL_Q]],
+    Y_real   = as.numeric(.data[[COL_Y]]),
+    C_real   = as.numeric(.data[[COL_C]]),
+    T_nom    = as.numeric(.data[[COL_T]]),
+    W_nom    = as.numeric(.data[[COL_W]]),
+    P        = as.numeric(.data[[COL_P]])  # used AS-IS (no /100)
+  )
+
+# parse quarters like "Mar-00" (fallback "Mar-2000")
+d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%y"))
+if (any(is.na(d$date))) d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%Y"))
+d$Date <- as.Date(d$date)
+
+# remove COVID period
+d <- d %>% filter(date < COVID_START | date > COVID_END)
+
+# deflate ONLY transfers & illiquid wealth; build regression vars
+d <- d %>%
+  mutate(
+    T_real     = T_nom / P,
+    W_real     = W_nom / P,
+    den        = Y_real - T_real,
+    num        = C_real - T_real,
+    ratio_data = num / den,
+    W_over_den = W_real / den
+  ) %>%
+  filter(is.finite(ratio_data), is.finite(W_over_den)) %>%
+  arrange(Date)
+
+# --- Figure 1: fit simple OLS and plot Data vs Predicted (no break) ---
+ols1 <- lm(ratio_data ~ W_over_den, data = d)
+d$ratio_pred <- as.numeric(predict(ols1, newdata = d))
+
+ylims_f1 <- nice_limits(c(d$ratio_data, d$ratio_pred))
+
+fig1 <- ggplot(d, aes(x = Date)) +
+  geom_line(aes(y = ratio_data, colour = "Data"), linewidth = 1) +
+  geom_line(aes(y = ratio_pred, colour = "Predicted"),
+            linewidth = 1, linetype = "dotted") +
+  scale_colour_manual(values = c("Data" = "black", "Predicted" = "#2C7FB8")) +
+  scale_y_continuous(limits = ylims_f1, expand = expansion(mult = c(0,0))) +
+  labs(title = "Figure 1. Consumption-to-income ratio (COVID removed)",
+       y = "Ratio", x = NULL, colour = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+    plot.background = element_blank(),
+    legend.position = "bottom"
+  )
+
+print(fig1)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
