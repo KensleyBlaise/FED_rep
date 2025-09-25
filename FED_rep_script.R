@@ -1,4 +1,4 @@
-# ============ Rolling MPC (zero line + panel border, no break) ============
+# ============ Rolling MPC (use deflator as-is; zero line + border) ============
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
 })
@@ -6,15 +6,15 @@ suppressPackageStartupMessages({
 # ---- Config ----
 XLSX_FILE <- "FED_rep.xlsx"
 SHEET     <- "Sheet29"
-ROLL_WIN  <- 40L  # quarters (~10y); change if you like
+ROLL_WIN  <- 40L  # quarters (~10y)
 
-# Your column names
+# Exact column names in your sheet
 COL_Q <- "Q"
 COL_Y <- "Real income"    # already real
 COL_C <- "Real Cons"      # already real
 COL_T <- "Gov benefits"   # nominal -> deflate
 COL_W <- "Ill wealth"     # nominal -> deflate
-COL_P <- "Cons Deflator"  # deflator
+COL_P <- "Cons Deflator"  # deflator (USED AS-IS — NO RESCALE)
 
 # ---- Load & prep ----
 raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
@@ -27,18 +27,15 @@ d <- raw %>%
     C_real   = as.numeric(.data[[COL_C]]),
     T_nom    = as.numeric(.data[[COL_T]]),
     W_nom    = as.numeric(.data[[COL_W]]),
-    P        = as.numeric(.data[[COL_P]])
+    P        = as.numeric(.data[[COL_P]])  # used exactly as given
   )
 
-# Parse quarters like "Mar-00" (fallback "Mar-2000")
+# Parse quarter labels like "Mar-00" (fallback "Mar-2000")
 d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%y"))
 if (any(is.na(d$date))) d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%Y"))
 d$Date <- as.Date(d$date)
 
-# Put deflator on 0.xx if needed
-if (mean(d$P, na.rm = TRUE) > 5) d$P <- d$P / 100
-
-# Deflate ONLY transfers & illiquid wealth; build regression vars
+# --- Deflate ONLY transfers & illiquid wealth with P AS-IS ---
 d <- d %>%
   mutate(
     T_real     = T_nom / P,
@@ -67,6 +64,7 @@ for (s in 1:(n - ROLL_WIN + 1L)) {
     rows[[s]] <- data.frame(Date = d$Date[center], beta = NA_real_, se = NA_real_)
     next
   }
+
   fit <- lm(ratio_data ~ W_over_den, data = sub)
   b   <- as.numeric(coef(fit)["W_over_den"])
   se  <- summary(fit)$coef["W_over_den", "Std. Error"]
@@ -89,14 +87,14 @@ roll <- do.call(rbind, rows) %>%
 roll_line <- dplyr::filter(roll, is.finite(beta_cents))
 roll_band <- dplyr::filter(roll, is.finite(lo) & is.finite(hi))
 
-# ---- Dynamic y-limits that always include zero ----
+# ---- Symmetric y-limits around zero (always shows the 0 line) ----
 vals <- c(roll_line$beta_cents, roll_band$lo, roll_band$hi, 0)
 vals <- vals[is.finite(vals)]
-ylims <- range(vals)
-pad   <- 0.05 * diff(ylims); if (!is.finite(pad)) pad <- 0.1
-ylims <- c(ylims[1] - pad, ylims[2] + pad)
+rng  <- range(vals); pad <- 0.05 * diff(rng); if (!is.finite(pad)) pad <- 0.1
+lim  <- max(abs(rng)) + pad
+ylims <- c(-lim, lim)
 
-# ---- Plot: rolling MPC with zero line + border ----
+# ---- Plot: rolling MPC with 95% CI band, zero line, border ----
 p <- ggplot() +
   { if (nrow(roll_band) > 0)
       geom_ribbon(data = roll_band,
@@ -104,8 +102,8 @@ p <- ggplot() +
                   fill = "#FB9A99", alpha = 0.35) } +
   geom_line(data = roll_line,
             aes(x = Date, y = beta_cents),
-            colour = "#E31A1C", linewidth = 1.0, na.rm = TRUE) +
-  geom_hline(yintercept = 0, colour = "black", linewidth = 0.6) +  # zero line
+            colour = "#E31A1C", linewidth = 1.05, na.rm = TRUE) +
+  geom_hline(yintercept = 0, colour = "black", linewidth = 0.7) +
   scale_y_continuous("Cents",
                      limits = ylims,
                      breaks = pretty(ylims, n = 6),
@@ -113,7 +111,7 @@ p <- ggplot() +
   labs(title = "Rolling 10-year MPC out of Wealth (OLS, 95% CI)", x = NULL) +
   theme_minimal(base_size = 12) +
   theme(panel.grid = element_blank(),
-        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),  # border
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
         plot.background = element_blank())
 
 print(p)
