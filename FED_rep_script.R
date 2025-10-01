@@ -1,3 +1,165 @@
+
+# ==== Rolling MPC with multiple windows (30, 35, 40), single plot, overlapping CIs ====
+suppressPackageStartupMessages({
+  library(readxl); library(dplyr); library(ggplot2); library(zoo)
+})
+
+# --- Config ---
+XLSX_FILE <- "FED_rep.xlsx"
+SHEET     <- "Sheet29"
+ROLL_WINS <- c(30L, 35L, 40L)   # windows to compare (in quarters)
+
+# Use your column names exactly
+COL_Q <- "Q"
+COL_Y <- "Real income"     # already real
+COL_C <- "Real Cons"       # already real
+COL_T <- "Gov benefits"    # nominal -> deflate
+COL_W <- "Ill wealth"      # nominal -> deflate
+COL_P <- "Cons Deflator"   # deflator (USE AS-IS — NO RESCALE)
+
+# Remove COVID period (as requested in earlier steps)
+COVID_START <- as.yearqtr("2020 Q1")
+COVID_END   <- as.yearqtr("2021 Q4")
+
+# --- Load & prep ---
+raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
+names(raw) <- trimws(names(raw))
+
+d <- raw %>%
+  transmute(
+    Q        = .data[[COL_Q]],
+    Y_real   = as.numeric(.data[[COL_Y]]),
+    C_real   = as.numeric(.data[[COL_C]]),
+    T_nom    = as.numeric(.data[[COL_T]]),
+    W_nom    = as.numeric(.data[[COL_W]]),
+    P        = as.numeric(.data[[COL_P]])   # used AS-IS (no /100)
+  )
+
+# Parse quarters like "Mar-00" (fallback "Mar-2000")
+d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%y"))
+if (any(is.na(d$date))) d$date <- suppressWarnings(as.yearqtr(d$Q, format = "%b-%Y"))
+d$Date <- as.Date(d$date)
+
+# Remove COVID period
+d <- d %>% filter(date < COVID_START | date > COVID_END)
+
+# Build regression variables (deflate ONLY transfers & illiquid wealth)
+d <- d %>%
+  mutate(
+    T_real     = T_nom / P,
+    W_real     = W_nom / P,
+    den        = Y_real - T_real,
+    num        = C_real - T_real,
+    ratio_data = num / den,
+    W_over_den = W_real / den
+  ) %>%
+  filter(is.finite(ratio_data), is.finite(W_over_den)) %>%
+  arrange(Date)
+
+stopifnot(nrow(d) >= max(ROLL_WINS))
+
+# --- Rolling OLS helper: returns a data.frame with beta & OLS SE for a given window ---
+roll_ols <- function(df, win) {
+  n <- nrow(df)
+  out <- vector("list", n - win + 1L)
+  for (s in 1:(n - win + 1L)) {
+    e <- s + win - 1L
+    # center index (works for even/odd windows)
+    center <- if (win %% 2 == 0) s + (win/2 - 1L) else s + floor(win/2)
+    sub <- df[s:e, , drop = FALSE]
+
+    if (!all(is.finite(sub$ratio_data)) || !all(is.finite(sub$W_over_den)) ||
+        var(sub$W_over_den, na.rm = TRUE) <= 0) {
+      out[[s]] <- data.frame(Date = df$Date[center], beta = NA_real_, se = NA_real_)
+      next
+    }
+    fit <- lm(ratio_data ~ W_over_den, data = sub)
+    b   <- as.numeric(coef(fit)["W_over_den"])
+    se  <- summary(fit)$coef["W_over_den", "Std. Error"]
+    out[[s]] <- data.frame(Date = df$Date[center], beta = b, se = se)
+  }
+  do.call(rbind, out) %>%
+    mutate(
+      Window      = paste0(win, "q"),
+      beta_cents  = 100 * beta,
+      lo          = 100 * (beta - 1.96 * se),
+      hi          = 100 * (beta + 1.96 * se)
+    ) %>%
+    arrange(Date)
+}
+
+# --- Compute rolling series for each window and bind ---
+roll_list <- lapply(ROLL_WINS, function(w) roll_ols(d, w))
+roll_all  <- dplyr::bind_rows(roll_list)
+
+# Split for plotting
+roll_lines <- roll_all %>% filter(is.finite(beta_cents))
+roll_bands <- roll_all %>% filter(is.finite(lo) & is.finite(hi))
+
+# Dynamic symmetric y-limits around zero (so 0 line is always visible)
+vals <- c(roll_lines$beta_cents, roll_bands$lo, roll_bands$hi, 0)
+vals <- vals[is.finite(vals)]
+rng  <- range(vals)
+pad  <- 0.05 * diff(rng); if (!is.finite(pad)) pad <- 0.1
+lim  <- max(abs(rng)) + pad
+ylims <- c(-lim, lim)
+
+# Colors/fills for the three windows
+col_map  <- c("30q" = "#1f78b4", "35q" = "#33a02c", "40q" = "#e31a1c")
+fill_map <- c("30q" = "#a6cee3", "35q" = "#b2df8a", "40q" = "#fb9a99")
+
+# --- Plot: three rolling lines + overlapping CI ribbons on the same axes ---
+p <- ggplot() +
+  { if (nrow(roll_bands) > 0)
+      geom_ribbon(data = roll_bands,
+                  aes(x = Date, ymin = lo, ymax = hi, fill = Window),
+                  alpha = 0.25, colour = NA) } +
+  geom_line(data = roll_lines,
+            aes(x = Date, y = beta_cents, colour = Window),
+            linewidth = 1.0, na.rm = TRUE) +
+  geom_hline(yintercept = 0, colour = "black", linewidth = 0.7) +
+  scale_colour_manual(values = col_map) +
+  scale_fill_manual(values = fill_map) +
+  scale_y_continuous("Cents",
+                     limits = ylims,
+                     breaks = pretty(ylims, n = 6),
+                     expand = expansion(mult = c(0,0))) +
+  labs(title = "Rolling MPC out of Wealth — 30q vs 35q vs 40q (OLS, 95% CI, COVID removed)",
+       x = NULL, colour = "Window", fill = "Window") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+        plot.background = element_blank(),
+        legend.position = "bottom")
+
+print(p)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ggplot() +
   geom_line(data = subset(df_obs, Quarter >= as.yearqtr("2021 Q1")),
             aes(x = Quarter, y = Growth), colour = "black") +
