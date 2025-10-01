@@ -1,4 +1,11 @@
-
+autoplot(g_ts) +
+  geom_point(data = df_fc, aes(x = Quarter, y = Forecast),
+             colour = "red", shape = 16, size = 3) +
+  geom_line(data = df_fc, aes(x = Quarter, y = Forecast),
+            colour = "red", linetype = "dotted") +
+  labs(title = "Mortgage Approvals Growth (QoQ)",
+       y = "Growth rate (%)", x = "Quarter") +
+  theme_minimal()
 
 
 
