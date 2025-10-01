@@ -1,4 +1,13 @@
-
+ggplot() +
+  geom_line(data = subset(df_obs, Quarter >= as.yearqtr("2021 Q1")),
+            aes(x = Quarter, y = Growth), colour = "black") +
+  geom_point(data = df_fc, aes(x = Quarter, y = Forecast),
+             colour = "red", size = 3) +
+  geom_line(data = df_fc, aes(x = Quarter, y = Forecast),
+            colour = "red", linetype = "dotted") +
+  labs(title = "Mortgage Approvals Growth (QoQ)",
+       x = "Quarter", y = "Growth rate (%)") +
+  theme_minimal()
 
 fc_vals  <- as.numeric(fcst$mean)       # the two predicted values
 fc_time  <- time(fcst$mean)             # their corresponding quarters
