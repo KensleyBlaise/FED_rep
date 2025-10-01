@@ -1,3 +1,244 @@
+# ================================================================
+# Reproduce Figure 1 (with a structural break at COVID = 2020Q1)
+# and Figure 2 (rolling MPC with 30/35/40-quarter windows).
+# - Uses your deflator AS-IS (no rescaling)
+# - C and Y already real; only T and W are deflated by P
+# - No recession shading
+# - Clean border; minimal grid
+# ================================================================
+suppressPackageStartupMessages({
+  library(readxl)
+  library(dplyr)
+  library(ggplot2)
+  library(zoo)       # as.yearqtr
+})
+
+# ---------------- CONFIG ----------------
+XLSX_FILE   <- "FED_rep.xlsx"
+SHEET       <- "Sheet29"
+BREAK_QTR   <- zoo::as.yearqtr("2020 Q1")  # structural break AT COVID
+ROLL_WINS   <- c(30L, 35L, 40L)            # windows for Figure 2
+
+# Exact column names in your sheet
+COL_Q <- "Q"              # e.g. "Mar-00"
+COL_Y <- "Real income"    # already real
+COL_C <- "Real Cons"      # already real
+COL_T <- "Gov benefits"   # nominal -> deflate
+COL_W <- "Ill wealth"     # nominal -> deflate
+COL_P <- "Cons Deflator"  # deflator (AS-IS)
+
+# ---------- helper: "nice" y-limits ----------
+nice_limits <- function(vals, pad_mult = 0.05) {
+  vals <- vals[is.finite(vals)]
+  r <- range(vals, na.rm = TRUE)
+  span <- max(r[2] - r[1], 1e-9)
+  pad <- pad_mult * span
+  c(r[1] - pad, r[2] + pad)
+}
+
+# ---------------- LOAD & PREP -----------------
+raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
+names(raw) <- trimws(names(raw))
+
+d <- raw %>%
+  transmute(
+    Q        = .data[[COL_Q]],
+    Y_real   = as.numeric(.data[[COL_Y]]),
+    C_real   = as.numeric(.data[[COL_C]]),
+    T_nom    = as.numeric(.data[[COL_T]]),
+    W_nom    = as.numeric(.data[[COL_W]]),
+    P        = as.numeric(.data[[COL_P]])     # USED AS-IS (no /100)
+  )
+
+# Parse quarters like "Mar-00" (fallback to "Mar-2000")
+d$date <- suppressWarnings(zoo::as.yearqtr(d$Q, format = "%b-%y"))
+if (any(is.na(d$date))) d$date <- suppressWarnings(zoo::as.yearqtr(d$Q, format = "%b-%Y"))
+d$Date <- as.Date(d$date)
+
+# Deflate ONLY transfers & wealth; build regression variables
+d <- d %>%
+  mutate(
+    T_real     = T_nom / P,
+    W_real     = W_nom / P,
+    den        = Y_real - T_real,
+    num        = C_real - T_real,
+    ratio_data = num / den,
+    W_over_den = W_real / den
+  ) %>%
+  filter(is.finite(ratio_data), is.finite(W_over_den)) %>%
+  arrange(Date)
+
+# ---------------- Figure 1: Data vs Predicted + Predicted with COVID break ----------------
+# No-break model
+ols_base <- lm(ratio_data ~ W_over_den, data = d)
+d$ratio_pred <- as.numeric(predict(ols_base, newdata = d))
+
+# Break model at COVID (allows intercept + slope shift)
+d$post   <- as.integer(d$date >= BREAK_QTR)
+d$post_W <- d$post * d$W_over_den
+ols_break <- lm(ratio_data ~ W_over_den + post + post_W, data = d)
+d$ratio_pred_break <- as.numeric(predict(ols_break, newdata = d))
+
+ylims_f1 <- nice_limits(c(d$ratio_data, d$ratio_pred, d$ratio_pred_break))
+
+fig1 <- ggplot(d, aes(x = Date)) +
+  geom_line(aes(y = ratio_data, colour = "Observed data", linetype = "Observed data"),
+            linewidth = 1.1) +
+  geom_line(aes(y = ratio_pred, colour = "Predicted", linetype = "Predicted"),
+            linewidth = 1.4, lineend = "round") +
+  geom_line(aes(y = ratio_pred_break, colour = "Predicted (break at 2020Q1)",
+                linetype = "Predicted (break at 2020Q1)"),
+            linewidth = 1.2) +
+  scale_colour_manual(values = c("Observed data" = "black",
+                                 "Predicted" = "#2C7FB8",
+                                 "Predicted (break at 2020Q1)" = "#D95F02")) +
+  scale_linetype_manual(values = c("Observed data" = "solid",
+                                   "Predicted" = "dotted",
+                                   "Predicted (break at 2020Q1)" = "dashed")) +
+  scale_y_continuous(limits = ylims_f1, expand = expansion(mult = c(0,0))) +
+  labs(title = "Figure 1. Consumption-to-income ratio (COVID break at 2020Q1)",
+       y = "Ratio", x = NULL, colour = NULL, linetype = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+        plot.background = element_blank(),
+        legend.position = "bottom")
+
+print(fig1)
+
+# ---------------- Figure 2: Rolling MPC (30/35/40) + break benchmarks at COVID -----------
+# Pre-/post-break MPC levels (from the break model)
+co <- coef(ols_break)
+beta_pre  <- unname(co["W_over_den"])
+beta_post <- beta_pre + unname(co["post_W"])
+y_pre  <- 100 * beta_pre
+y_post <- 100 * beta_post
+
+# Rolling OLS helper
+roll_ols <- function(df, win) {
+  n <- nrow(df)
+  if (n < win) stop("Not enough rows for window = ", win, " (n = ", n, ")")
+  out <- vector("list", n - win + 1L)
+  for (s in 1:(n - win + 1L)) {
+    e <- s + win - 1L
+    center <- if (win %% 2 == 0) s + (win/2 - 1L) else s + floor(win/2)
+    sub <- df[s:e, , drop = FALSE]
+    if (!all(is.finite(sub$ratio_data)) || !all(is.finite(sub$W_over_den)) ||
+        var(sub$W_over_den, na.rm = TRUE) <= 0) {
+      out[[s]] <- data.frame(Date = df$Date[center], beta = NA_real_, se = NA_real_)
+      next
+    }
+    fit <- lm(ratio_data ~ W_over_den, data = sub)
+    b   <- as.numeric(coef(fit)["W_over_den"])
+    se  <- summary(fit)$coef["W_over_den", "Std. Error"]
+    out[[s]] <- data.frame(Date = df$Date[center], beta = b, se = se)
+  }
+  do.call(rbind, out) %>%
+    mutate(Window = paste0(win, "q"),
+           beta_cents = 100*beta,
+           lo = 100*(beta - 1.96*se),
+           hi = 100*(beta + 1.96*se)) %>%
+    arrange(Date)
+}
+
+roll_list <- lapply(ROLL_WINS, function(w) roll_ols(d, w))
+roll_all  <- dplyr::bind_rows(roll_list)
+
+lines_df <- roll_all %>% filter(is.finite(beta_cents))
+band_df  <- roll_all %>% filter(is.finite(lo) & is.finite(hi))
+
+# y-limits include rolling bands AND break levels
+vals <- c(lines_df$beta_cents, band_df$lo, band_df$hi, y_pre, y_post)
+vals <- vals[is.finite(vals)]
+ylims <- nice_limits(vals, pad_mult = 0.06)
+
+# Bracket at COVID break (clipped to plotting range)
+x_min   <- min(d$Date);  x_max <- max(d$Date)
+x_break <- as.Date(as.yearqtr(BREAK_QTR))
+pad_days <- 15L
+hseg <- data.frame(
+  xstart = c(x_min,            x_break + pad_days),
+  xend   = c(x_break - pad_days, x_max),
+  y      = c(y_pre, y_post)
+)
+hseg <- subset(hseg, is.finite(y) & y >= ylims[1] & y <= ylims[2])
+vseg <- NULL
+if (is.finite(y_pre) && is.finite(y_post)) {
+  v0 <- max(min(y_pre, y_post), ylims[1])
+  v1 <- min(max(y_pre, y_post), ylims[2])
+  if (v1 > v0) vseg <- data.frame(x = x_break, y0 = v0, y1 = v1)
+}
+
+# Colors/fills for windows
+col_map  <- c("30q" = "#1f78b4", "35q" = "#33a02c", "40q" = "#e31a1c")
+fill_map <- c("30q" = "#a6cee3", "35q" = "#b2df8a", "40q" = "#fb9a99")
+
+fig2 <- ggplot() +
+  { if (nrow(band_df) > 0)
+      geom_ribbon(data = band_df,
+                  aes(x = Date, ymin = lo, ymax = hi, fill = Window),
+                  alpha = 0.22, colour = NA) } +
+  geom_line(data = lines_df,
+            aes(x = Date, y = beta_cents, colour = Window),
+            linewidth = 1.0, na.rm = TRUE) +
+  { if (nrow(hseg) > 0)
+      geom_segment(data = hseg,
+                   aes(x = xstart, xend = xend, y = y, yend = y),
+                   linetype = "dotted", colour = "black", linewidth = 0.9) } +
+  { if (!is.null(vseg))
+      geom_segment(data = vseg,
+                   aes(x = x, xend = x, y = y0, yend = y1),
+                   linetype = "dotted", colour = "black", linewidth = 0.9) } +
+  scale_colour_manual(values = col_map) +
+  scale_fill_manual(values = fill_map) +
+  scale_y_continuous("Cents", limits = ylims,
+                     breaks = pretty(ylims, n = 6),
+                     expand = expansion(mult = c(0,0))) +
+  labs(title = "Figure 2. Rolling MPC — 30q vs 35q vs 40q (break at 2020Q1)",
+       x = NULL, colour = "Window", fill = "Window") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid   = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+        plot.background = element_blank(),
+        legend.position = "bottom")
+
+print(fig2)
+# ================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # ==== Rolling MPC with multiple windows (30, 35, 40), single plot, overlapping CIs ====
 suppressPackageStartupMessages({
