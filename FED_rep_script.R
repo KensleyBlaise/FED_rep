@@ -1,3 +1,15 @@
+
+
+fc_vals  <- as.numeric(fcst$mean)       # the two predicted values
+fc_time  <- time(fcst$mean)             # their corresponding quarters
+
+# Put them into a small data.frame for ggplot
+df_fc <- data.frame(
+  Quarter = as.yearqtr(fc_time),
+  Forecast = fc_vals
+)
+
+
 autoplot(g_ts) +
   geom_point(data = df_fc, aes(x = Quarter, y = Forecast),
              colour = "red", shape = 16, size = 3) +
