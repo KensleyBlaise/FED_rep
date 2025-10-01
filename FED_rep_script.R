@@ -1,3 +1,113 @@
+
+
+
+
+
+suppressPackageStartupMessages({
+  library(forecast)   # auto.arima, forecast, tsCV
+})
+
+# ---- Quarterly series (frequency = 4) ----
+# If it's already a ts with freq=4, this will keep it; otherwise convert.
+mortgage_ts <- if (is.ts(mortgage_Approval) && frequency(mortgage_Approval) == 4) {
+  mortgage_Approval
+} else {
+  ts(mortgage_Approval, frequency = 4)
+}
+
+# ---- Fit on full sample ----
+fit <- auto.arima(mortgage_ts)
+
+# ---- Next 1- and 2-step forecasts from the final fit ----
+fc <- forecast(fit, h = 2)
+fc_1step <- fc$mean[1]
+fc_2step <- fc$mean[2]
+
+# ---- Rolling CV RMSE for h = 1 and h = 2 (re-fits auto.arima each step) ----
+cv_errors <- tsCV(
+  mortgage_ts,
+  forecastfunction = function(y, h) forecast(auto.arima(y), h = h)$mean,
+  h = 2
+)
+rmse_h1 <- sqrt(mean(cv_errors[, 1]^2, na.rm = TRUE))
+rmse_h2 <- sqrt(mean(cv_errors[, 2]^2, na.rm = TRUE))
+
+# ---- Print results ----
+cat("Selected model:", capture.output(fit)[1], "\n\n")
+cat("1-step-ahead forecast: ", round(fc_1step, 3), "\n")
+cat("2-step-ahead forecast: ", round(fc_2step, 3), "\n\n")
+cat("RMSE (h = 1): ", round(rmse_h1, 4), "\n")
+cat("RMSE (h = 2): ", round(rmse_h2, 4), "\n")
+
+
+
+
+
+
+# ================================================================
+# PART B: Scenario Forecasts
+# ================================================================
+
+# Function to create scenario forecasts
+scenario_forecast <- function(y, h, scenario = c("trend", "constant", "reversal")) {
+  fit <- auto.arima(y)
+  fc <- forecast(fit, h = h)
+  
+  # extract last observed value and forecasted trend
+  last_val <- tail(y, 1)
+  fc_vals <- fc$mean
+  
+  if (scenario == "trend") {
+    # Keep auto.arima forecast
+    return(fc_vals)
+    
+  } else if (scenario == "constant") {
+    # Assume it stays flat at last observed level
+    return(rep(last_val, h))
+    
+  } else if (scenario == "reversal") {
+    # Take the auto.arima trend but flip the deviation around last value
+    return(last_val - (fc_vals - last_val))
+  }
+}
+
+# --- Rolling CV errors for each scenario ---
+cv_scenario <- function(scenario, h) {
+  cv_err <- tsCV(
+    mortgage_ts,
+    forecastfunction = function(y, h) scenario_forecast(y, h, scenario = scenario),
+    h = h
+  )
+  sqrt(colMeans(cv_err^2, na.rm = TRUE)) # RMSE for each horizon
+}
+
+# Compute RMSEs for each scenario
+rmse_trend    <- cv_scenario("trend", h = 2)
+rmse_constant <- cv_scenario("constant", h = 2)
+rmse_reversal <- cv_scenario("reversal", h = 2)
+
+# ---- Display results ----
+cat("RMSE (Trend scenario)    h=1:", round(rmse_trend[1], 4), 
+    " h=2:", round(rmse_trend[2], 4), "\n")
+cat("RMSE (Constant scenario) h=1:", round(rmse_constant[1], 4), 
+    " h=2:", round(rmse_constant[2], 4), "\n")
+cat("RMSE (Reversal scenario) h=1:", round(rmse_reversal[1], 4), 
+    " h=2:", round(rmse_reversal[2], 4), "\n")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ============ Rolling MPC (30-quarter window, COVID removed, P as-is) ============
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
