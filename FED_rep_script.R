@@ -1,3 +1,98 @@
+make_panel <- function(df_lines, df_bands, title) {
+  # symmetric limits around 0
+  yall  <- c(df_lines$beta_cents, df_bands$lo, df_bands$hi, 0)
+  yall  <- yall[is.finite(yall)]
+  if (!length(yall)) yall <- c(-1, 1)
+  yrng  <- range(yall); pad <- 0.05 * diff(yrng); if (!is.finite(pad)) pad <- 0.1
+  ylims <- c(-(max(abs(yrng)) + pad), max(abs(yrng)) + pad)
+
+  # x/y geometry for the little color bars and labels
+  xr   <- range(df_lines$Date, na.rm = TRUE)
+  if (!all(is.finite(xr))) xr <- as.Date(c("2000-01-01","2005-01-01"))
+  dx   <- as.numeric(diff(xr)); if (!is.finite(dx) || dx <= 0) dx <- 1
+  dy   <- diff(ylims);         if (!is.finite(dy) || dy <= 0) dy <- 1
+
+  # order legend entries as 10q, 15q, 20q (keep only those present)
+  win_order <- c("10q","15q","20q")
+  wins <- win_order[win_order %in% unique(df_lines$Window)]
+  nW   <- length(wins)
+
+  legend_df <- data.frame(
+    x0 = xr[2] - 0.25 * dx,                # start of color bar
+    x1 = xr[2] - 0.15 * dx,                # end of color bar
+    y  = ylims[2] - (0.07*dy) - (0:(nW-1)) * 0.08*dy,
+    Window = wins,
+    label  = wins
+  )
+
+  ggplot() +
+    { if (nrow(df_bands) > 0)
+        geom_ribbon(data = df_bands,
+                    aes(x = Date, ymin = lo, ymax = hi, fill = Window),
+                    alpha = 0.22, colour = NA) } +
+    geom_line(data = df_lines,
+              aes(x = Date, y = beta_cents, colour = Window),
+              linewidth = 1.0, na.rm = TRUE) +
+    geom_hline(yintercept = 0, colour = "black", linewidth = 0.7) +
+    # inline legend: colored bars + text
+    { if (nW > 0)
+        geom_segment(data = legend_df,
+                     aes(x = x0, xend = x1, y = y, yend = y, colour = Window),
+                     linewidth = 2, inherit.aes = FALSE) } +
+    { if (nW > 0)
+        geom_text(data = legend_df,
+                  aes(x = x1 + 0.01*dx, y = y, label = label),
+                  hjust = 0, vjust = 0.5, size = 3.3, colour = "black",
+                  inherit.aes = FALSE) } +
+    scale_colour_manual(values = col_map) +
+    scale_fill_manual(values = fill_map) +
+    scale_y_continuous("Cents", limits = ylims,
+                       breaks = pretty(ylims, n = 6),
+                       expand = expansion(mult = c(0,0))) +
+    labs(title = title, x = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid = element_blank(),
+          panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+          plot.background = element_blank(),
+          legend.position = "none")  # hide external legend
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ================= Figure 2 — Rolling MPC (10, 15, 20 quarters) in a 2×2 panel =================
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
