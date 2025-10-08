@@ -1,4 +1,4 @@
-# ===== Figure 1 — Predicted vs Observed (auto-detect quarter col; all series real) =====
+# ===== Figure 1 — Predicted vs Observed (Date column = "Datei t") =====
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
 })
@@ -6,11 +6,9 @@ suppressPackageStartupMessages({
 # --- Config ---
 XLSX_FILE <- "FED_rep.xlsx"
 SHEET     <- "variables"
-REMOVE_COVID <- FALSE                 # set TRUE to drop 2020Q1–2021Q4
-COVID_START  <- as.yearqtr("2020 Q1")
-COVID_END    <- as.yearqtr("2021 Q4")
 
-# Exact variable names in columns H–M (plus a date/quarter column somewhere)
+# Exact column names
+DATE_COL <- "Datei t"                # << your date/quarter column in col A
 COL_C  <- "Real Consumption"
 COL_Y  <- "Real Income"
 COL_T  <- "Real Gov Benefits"
@@ -18,86 +16,49 @@ COL_WL <- "Real Liquid Assets"
 COL_WI <- "Real Illiquid Assets"
 COL_MS <- "Real Mortgage Spread"
 
-# Helper: tidy y-limits
+# helper for tidy y-limits
 nice_limits <- function(v, pad_mult = 0.04) {
   v <- v[is.finite(v)]; r <- range(v); s <- max(diff(r), 1e-9)
   c(r[1] - pad_mult*s, r[2] + pad_mult*s)
 }
 
-# Helper: find and parse a quarter/date column automatically
-find_quarter <- function(df) {
-  nms <- names(df)
-  # try common names first
-  cand_names <- c("Q","Quarter","quarter","Date","date","Period","Time","Quarterly")
-  pick <- cand_names[cand_names %in% nms]
-  if (length(pick) == 0) {
-    stop("Could not find a quarter/date column. Available columns are:\n",
-         paste(nms, collapse = ", "),
-         "\nRename your quarter column to something like 'Q'/'Quarter'/'Date', or edit the code to set it explicitly.")
-  }
-  qcol <- pick[1]
-  x <- df[[qcol]]
-
-  # already Date?
-  if (inherits(x, "Date")) return(list(yq = as.yearqtr(x), label = qcol))
-
-  # Excel serial date parsed as numeric?
-  if (is.numeric(x) && any(!is.na(x))) {
-    maybe_date <- try(as.Date(x, origin = "1899-12-30"), silent = TRUE)
-    if (!inherits(maybe_date, "try-error") && any(!is.na(maybe_date))) {
-      return(list(yq = as.yearqtr(maybe_date), label = qcol))
-    }
-  }
-
-  # character: try several quarter formats
-  if (is.character(x)) {
-    fmts <- c("%b-%y","%b-%Y","%Y Q%q","Q%q %Y","%YQ%q","%Y-%q","%qQ%Y")
-    for (f in fmts) {
-      yq <- suppressWarnings(as.yearqtr(x, format = f))
-      if (any(!is.na(yq))) return(list(yq = yq, label = qcol))
-    }
-    # plain date strings?
-    maybe_date <- suppressWarnings(as.Date(x))
-    if (any(!is.na(maybe_date))) return(list(yq = as.yearqtr(maybe_date), label = qcol))
-  }
-
-  stop("Found a candidate quarter/date column ('", qcol,
-       "') but could not parse it. Example values: ",
-       paste(utils::head(unique(x), 5), collapse = ", "),
-       "\nEdit the code to specify the correct format in as.yearqtr().")
-}
-
 # --- Load ---
 raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
 names(raw) <- trimws(names(raw))
-cat("Columns found:\n", paste(names(raw), collapse = " | "), "\n")
 
-# Auto-detect quarter column
-qinfo <- find_quarter(raw)
-date_q <- qinfo$yq
-cat("Using quarter column: ", qinfo$label, "\n")
+# --- Parse "Datei t" into Date (try quarters first, then dates/serials) ---
+x <- raw[[DATE_COL]]
 
-# Build analysis frame (H–M variables by name; all series are already real)
+yq <- suppressWarnings(as.yearqtr(x, format = "%Y Q%q"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%y"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%Y"))
+
+if (all(is.na(yq))) {
+  # maybe it is an actual date or an Excel serial
+  if (inherits(x, "Date")) {
+    yq <- as.yearqtr(x)
+  } else if (is.numeric(x)) {
+    yq <- as.yearqtr(as.Date(x, origin = "1899-12-30"))
+  } else {
+    yq <- as.yearqtr(suppressWarnings(as.Date(x)))
+  }
+}
+if (all(is.na(yq))) stop("Could not parse '", DATE_COL, "' as a date/quarter.")
+
+Date <- as.Date(yq)
+
+# --- Build analysis frame (ALL SERIES ARE ALREADY REAL — no deflator) ---
 d <- raw %>%
   transmute(
-    date_q = date_q,
+    Date,
     C_real = as.numeric(.data[[COL_C]]),
     Y_real = as.numeric(.data[[COL_Y]]),
     T_real = as.numeric(.data[[COL_T]]),
     Wliq   = as.numeric(.data[[COL_WL]]),
     Williq = as.numeric(.data[[COL_WI]]),
     MSpr   = as.numeric(.data[[COL_MS]])
-  )
-
-# Optional: remove COVID
-if (REMOVE_COVID) {
-  d <- d %>% filter(date_q < COVID_START | date_q > COVID_END)
-}
-
-# Build ratio and regressors (assets scaled by Y−T; spread in levels)
-d <- d %>%
+  ) %>%
   mutate(
-    Date       = as.Date(date_q),
     den        = Y_real - T_real,
     num        = C_real - T_real,
     ratio_data = num / den,
@@ -127,13 +88,8 @@ p <- ggplot(d, aes(x = Date)) +
   guides(colour = guide_legend(title = NULL),
          linetype = guide_legend(title = NULL)) +
   scale_y_continuous(limits = ylims, expand = expansion(mult = c(0,0))) +
-  labs(
-    title = if (REMOVE_COVID)
-              "Predicted vs Observed consumption-to-income ratio (3 covariates, COVID removed)"
-            else
-              "Predicted vs Observed consumption-to-income ratio (3 covariates)",
-    y = "Ratio", x = NULL
-  ) +
+  labs(title = "Predicted vs Observed consumption-to-income ratio (3 covariates)",
+       y = "Ratio", x = NULL) +
   theme_minimal(base_size = 12) +
   theme(panel.grid = element_blank(),
         panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
@@ -142,16 +98,8 @@ p <- ggplot(d, aes(x = Date)) +
 
 print(p)
 
-# Optional: coefficient table
+# Optional: see coefficients
 # summary(fit)
-
-
-
-
-
-
-
-
 
 
 
