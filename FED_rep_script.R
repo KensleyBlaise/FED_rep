@@ -1,3 +1,248 @@
+# ===================== Figure 2 — Rolling MPC (Liquid vs Illiquid; no/with COVID dummy) =====================
+suppressPackageStartupMessages({
+  library(readxl); library(dplyr); library(ggplot2); library(zoo)
+})
+
+# ---- Config ----
+XLSX_FILE <- "FED_rep.xlsx"
+SHEET     <- "variables"
+DATE_COL  <- "Datei t"           # column A
+
+# Variables (exact names)
+COL_C  <- "Real Consumption"
+COL_Y  <- "Real Income"
+COL_T  <- "Real Gov Benefits"
+COL_WL <- "Real Liquid Assets"
+COL_WI <- "Real Illiquid Assets"
+# Optional: include mortgage spread as a control (set to TRUE/FALSE)
+INCLUDE_SPREAD <- FALSE
+COL_MS <- "Real Mortgage Spread"
+
+# Rolling windows (quarters)
+ROLL_WINS <- c(30L, 35L, 40L)
+
+# COVID dummy window
+COVID_START <- as.yearqtr("2020 Q1")
+COVID_END   <- as.yearqtr("2021 Q4")
+
+# Colors / fills (per window)
+col_map  <- c("30q" = "#1f78b4", "35q" = "#33a02c", "40q" = "#e31a1c")
+fill_map <- c("30q" = "#a6cee3", "35q" = "#b2df8a", "40q" = "#fb9a99")
+
+# ---- Helpers ----
+pretty_limits_sym0 <- function(v) {
+  v <- v[is.finite(v)]
+  if (!length(v)) return(c(-1, 1))
+  rng <- range(v); pad <- 0.05 * diff(rng); if (!is.finite(pad)) pad <- 0.1
+  lim <- max(abs(rng)) + pad
+  c(-lim, lim)
+}
+
+# rolling OLS that returns the coefficient (and OLS SE) for a target regressor
+roll_coeff <- function(df, win, target = c("liq", "ill"), with_dummy = FALSE, include_spread = FALSE) {
+  target <- match.arg(target)
+  n <- nrow(df)
+  if (n < win) stop("Not enough rows for window ", win, " (n = ", n, ")")
+  out <- vector("list", n - win + 1L)
+
+  for (s in 1:(n - win + 1L)) {
+    e <- s + win - 1L
+    center <- if (win %% 2 == 0) s + (win/2 - 1L) else s + floor(win/2)
+    sub <- df[s:e, , drop = FALSE]
+
+    # build formula
+    if (include_spread) {
+      if (with_dummy) {
+        fml <- ratio_data ~ Wliq_den + Williq_den + MSpr + Dcovid
+      } else {
+        fml <- ratio_data ~ Wliq_den + Williq_den + MSpr
+      }
+    } else {
+      if (with_dummy) {
+        fml <- ratio_data ~ Wliq_den + Williq_den + Dcovid
+      } else {
+        fml <- ratio_data ~ Wliq_den + Williq_den
+      }
+    }
+
+    # sanity: finite & some variation in regressors
+    ok <- all(is.finite(sub$ratio_data), is.finite(sub$Wliq_den), is.finite(sub$Williq_den))
+    if (include_spread) ok <- ok && all(is.finite(sub$MSpr))
+    if (!ok || var(sub[[ifelse(target=="liq","Wliq_den","Williq_den")]], na.rm = TRUE) <= 0) {
+      out[[s]] <- data.frame(Date = df$Date[center], beta = NA_real_, se = NA_real_)
+      next
+    }
+
+    fit <- try(lm(fml, data = sub), silent = TRUE)
+    if (inherits(fit, "try-error")) {
+      out[[s]] <- data.frame(Date = df$Date[center], beta = NA_real_, se = NA_real_)
+      next
+    }
+
+    coef_name <- if (target == "liq") "Wliq_den" else "Williq_den"
+    b  <- tryCatch(as.numeric(coef(fit)[coef_name]), error = function(e) NA_real_)
+    se <- tryCatch(summary(fit)$coef[coef_name, "Std. Error"], error = function(e) NA_real_)
+    if (!is.finite(b))  b  <- NA_real_
+    if (!is.finite(se)) se <- NA_real_
+
+    out[[s]] <- data.frame(Date = df$Date[center], beta = b, se = se)
+  }
+
+  do.call(rbind, out) |>
+    mutate(Window = paste0(win, "q"),
+           beta_cents = 100 * beta,
+           lo = 100 * (beta - 1.96 * se),
+           hi = 100 * (beta + 1.96 * se)) |>
+    arrange(Date)
+}
+
+make_panel <- function(df_lines, df_bands, title) {
+  # symmetric limits around 0 so the zero line is clear
+  ylims <- pretty_limits_sym0(c(df_lines$beta_cents, df_bands$lo, df_bands$hi, 0))
+  ggplot() +
+    { if (nrow(df_bands) > 0)
+        geom_ribbon(data = df_bands,
+                    aes(x = Date, ymin = lo, ymax = hi, fill = Window),
+                    alpha = 0.22, colour = NA) } +
+    geom_line(data = df_lines,
+              aes(x = Date, y = beta_cents, colour = Window),
+              linewidth = 1.0, na.rm = TRUE) +
+    geom_hline(yintercept = 0, colour = "black", linewidth = 0.7) +
+    scale_colour_manual(values = col_map) +
+    scale_fill_manual(values = fill_map) +
+    scale_y_continuous("Cents",
+                       limits = ylims,
+                       breaks = pretty(ylims, n = 6),
+                       expand = expansion(mult = c(0,0))) +
+    labs(title = title, x = NULL, colour = "Window", fill = "Window") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid = element_blank(),
+          panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+          plot.background = element_blank(),
+          legend.position = "bottom")
+}
+
+# ---- Load & prepare data (all series already REAL) ----
+raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
+names(raw) <- trimws(names(raw))
+
+# Parse "Datei t" (YYYY Qq or Month-YY etc.)
+x  <- raw[[DATE_COL]]
+yq <- suppressWarnings(as.yearqtr(x, format = "%Y Q%q"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%y"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%Y"))
+if (all(is.na(yq))) {
+  if (inherits(x, "Date")) yq <- as.yearqtr(x)
+  else if (is.numeric(x))  yq <- as.yearqtr(as.Date(x, origin = "1899-12-30"))
+  else                     yq <- as.yearqtr(suppressWarnings(as.Date(x)))
+}
+stopifnot(any(!is.na(yq)))
+
+d <- raw %>%
+  transmute(
+    Date   = as.Date(yq),
+    yq     = yq,
+    C_real = as.numeric(.data[[COL_C]]),
+    Y_real = as.numeric(.data[[COL_Y]]),
+    T_real = as.numeric(.data[[COL_T]]),
+    Wliq   = as.numeric(.data[[COL_WL]]),
+    Williq = as.numeric(.data[[COL_WI]]),
+    MSpr   = if (INCLUDE_SPREAD) as.numeric(.data[[COL_MS]]) else NA_real_
+  ) %>%
+  mutate(
+    den        = Y_real - T_real,
+    ratio_data = C_real / den,       # DEP VAR: C / (Y - T)
+    Wliq_den   = Wliq / den,
+    Williq_den = Williq / den,
+    Dcovid     = as.integer(yq >= COVID_START & yq <= COVID_END)
+  ) %>%
+  filter(is.finite(ratio_data), is.finite(Wliq_den), is.finite(Williq_den)) %>%
+  { if (INCLUDE_SPREAD) filter(., is.finite(MSpr)) else . } %>%
+  arrange(Date)
+
+# ---- Compute rolling series for each window ----
+# A) No COVID dummy
+roll_liq_nod   <- lapply(ROLL_WINS, function(w) roll_coeff(d, w, target = "liq", with_dummy = FALSE, include_spread = INCLUDE_SPREAD)) |> bind_rows()
+roll_ill_nod   <- lapply(ROLL_WINS, function(w) roll_coeff(d, w, target = "ill", with_dummy = FALSE, include_spread = INCLUDE_SPREAD)) |> bind_rows()
+# B) With COVID dummy (intercept shift only; no interactions)
+roll_liq_cov   <- lapply(ROLL_WINS, function(w) roll_coeff(d, w, target = "liq", with_dummy = TRUE,  include_spread = INCLUDE_SPREAD)) |> bind_rows()
+roll_ill_cov   <- lapply(ROLL_WINS, function(w) roll_coeff(d, w, target = "ill", with_dummy = TRUE,  include_spread = INCLUDE_SPREAD)) |> bind_rows()
+
+# Split lines/ribbons
+L1_lines <- roll_liq_nod %>% filter(is.finite(beta_cents)); L1_bands <- roll_liq_nod %>% filter(is.finite(lo) & is.finite(hi))
+L2_lines <- roll_ill_nod %>% filter(is.finite(beta_cents)); L2_bands <- roll_ill_nod %>% filter(is.finite(lo) & is.finite(hi))
+L3_lines <- roll_liq_cov %>% filter(is.finite(beta_cents)); L3_bands <- roll_liq_cov %>% filter(is.finite(lo) & is.finite(hi))
+L4_lines <- roll_ill_cov %>% filter(is.finite(beta_cents)); L4_bands <- roll_ill_cov %>% filter(is.finite(lo) & is.finite(hi))
+
+# ---- Build the four panels ----
+p1 <- make_panel(L1_lines, L1_bands, "Liquid MPC — rolling (no COVID dummy)")
+p2 <- make_panel(L2_lines, L2_bands, "Illiquid MPC — rolling (no COVID dummy)")
+p3 <- make_panel(L3_lines, L3_bands, "Liquid MPC — rolling (+ COVID dummy)")
+p4 <- make_panel(L4_lines, L4_bands, "Illiquid MPC — rolling (+ COVID dummy)")
+
+# ---- Display as a 2×2 panel without extra packages ----
+op <- par(mfrow = c(2, 2))
+print(p1); print(p2); print(p3); print(p4)
+par(op)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ===== Nice table with stargazer (console + HTML) =====
 # install.packages(c("stargazer","sandwich","lmtest"))  # run once
 
