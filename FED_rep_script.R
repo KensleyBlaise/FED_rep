@@ -1,3 +1,168 @@
+# ===== Regressions for Chart 1 + nice table with stargazer =====
+# install.packages(c("readxl","dplyr","zoo","stargazer","sandwich","lmtest"))  # once
+
+suppressPackageStartupMessages({
+  library(readxl); library(dplyr); library(zoo)
+  library(stargazer); library(sandwich); library(lmtest)
+})
+
+# --- Config ---
+XLSX_FILE <- "FED_rep.xlsx"
+SHEET     <- "variables"
+DATE_COL  <- "Datei t"
+
+COL_C  <- "Real Consumption"
+COL_Y  <- "Real Income"
+COL_T  <- "Real Gov Benefits"
+COL_WL <- "Real Liquid Assets"
+COL_WI <- "Real Illiquid Assets"
+COL_MS <- "Real Mortgage Spread"
+
+COVID_START <- as.yearqtr("2020 Q1")
+COVID_END   <- as.yearqtr("2021 Q4")
+
+# --- Load and parse date (quarter) ---
+raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
+names(raw) <- trimws(names(raw))
+
+x <- raw[[DATE_COL]]
+yq <- suppressWarnings(as.yearqtr(x, format = "%Y Q%q"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%y"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%Y"))
+if (all(is.na(yq))) {
+  if (inherits(x, "Date")) yq <- as.yearqtr(x)
+  else if (is.numeric(x))  yq <- as.yearqtr(as.Date(x, origin = "1899-12-30"))
+  else                     yq <- as.yearqtr(suppressWarnings(as.Date(x)))
+}
+stopifnot(any(!is.na(yq)))
+
+# --- Build analysis frame (ALL variables already real) ---
+d <- raw %>%
+  transmute(
+    Date    = as.Date(yq),
+    yq      = yq,
+    C_real  = as.numeric(.data[[COL_C]]),
+    Y_real  = as.numeric(.data[[COL_Y]]),
+    T_real  = as.numeric(.data[[COL_T]]),
+    Wliq    = as.numeric(.data[[COL_WL]]),
+    Williq  = as.numeric(.data[[COL_WI]]),
+    MSpr    = as.numeric(.data[[COL_MS]])
+  ) %>%
+  mutate(
+    den        = Y_real - T_real,
+    num        = C_real - T_real,
+    ratio_data = num / den,
+    Wliq_den   = Wliq / den,
+    Williq_den = Williq / den,
+    Dcovid     = as.integer(yq >= COVID_START & yq <= COVID_END)
+  ) %>%
+  filter(is.finite(ratio_data), is.finite(Wliq_den), is.finite(Williq_den), is.finite(MSpr)) %>%
+  arrange(Date)
+
+# --- Models ---
+m1 <- lm(ratio_data ~ Wliq_den + Williq_den + MSpr, data = d)                     # baseline
+m2 <- lm(ratio_data ~ Wliq_den + Williq_den + MSpr + Dcovid, data = d)            # + COVID dummy
+m3 <- lm(ratio_data ~ (Wliq_den + Williq_den + MSpr) * Dcovid, data = d)          # + interactions
+
+# --- HAC/Newey–West standard errors (time series robust) ---
+# choose a modest lag (change if you prefer)
+nw_lag <- 4
+se1 <- sqrt(diag(NeweyWest(m1, lag = nw_lag, prewhite = FALSE, adjust = TRUE)))
+se2 <- sqrt(diag(NeweyWest(m2, lag = nw_lag, prewhite = FALSE, adjust = TRUE)))
+se3 <- sqrt(diag(NeweyWest(m3, lag = nw_lag, prewhite = FALSE, adjust = TRUE)))
+
+# --- Nice table to console ---
+stargazer(m1, m2, m3,
+  type = "text",
+  se = list(se1, se2, se3),
+  dep.var.labels = "(C − T) / (Y − T)",
+  column.labels = c("Baseline", "+ COVID dummy", "+ COVID interactions"),
+  covariate.labels = c(
+    "Liquid assets / (Y−T)",
+    "Illiquid assets / (Y−T)",
+    "Mortgage spread",
+    "COVID dummy",
+    "Liquid × COVID",
+    "Illiquid × COVID",
+    "Spread × COVID"
+  ),
+  digits = 3, omit.stat = c("f","ser"),
+  notes = "HAC (Newey–West) s.e.; COVID dummy = 1 for 2020Q1–2021Q4.",
+  notes.align = "l"
+)
+
+# --- Save an HTML version too (open reg_table.html in a browser) ---
+stargazer(m1, m2, m3,
+  type = "html", out = "reg_table.html",
+  se = list(se1, se2, se3),
+  dep.var.labels = "(C − T) / (Y − T)",
+  column.labels = c("Baseline", "+ COVID dummy", "+ COVID interactions"),
+  covariate.labels = c(
+    "Liquid assets / (Y−T)",
+    "Illiquid assets / (Y−T)",
+    "Mortgage spread",
+    "COVID dummy",
+    "Liquid × COVID",
+    "Illiquid × COVID",
+    "Spread × COVID"
+  ),
+  digits = 3, omit.stat = c("f","ser"),
+  notes = "HAC (Newey–West) s.e.; COVID dummy = 1 for 2020Q1–2021Q4.",
+  notes.align = "l"
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ===== Figure 1 — Predicted vs Observed with COVID dummy (Date col = "Datei t") =====
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
