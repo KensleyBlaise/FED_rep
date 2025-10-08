@@ -1,3 +1,148 @@
+# ===== Figure 1 — Predicted vs Observed with COVID dummy (Date col = "Datei t") =====
+suppressPackageStartupMessages({
+  library(readxl); library(dplyr); library(ggplot2); library(zoo)
+})
+
+# --- Config ---
+XLSX_FILE <- "FED_rep.xlsx"
+SHEET     <- "variables"
+DATE_COL  <- "Datei t"                # in column A
+
+# Exact column names
+COL_C  <- "Real Consumption"
+COL_Y  <- "Real Income"
+COL_T  <- "Real Gov Benefits"
+COL_WL <- "Real Liquid Assets"
+COL_WI <- "Real Illiquid Assets"
+COL_MS <- "Real Mortgage Spread"
+
+# COVID period (dummy = 1 inside this window)
+COVID_START <- as.yearqtr("2020 Q1")
+COVID_END   <- as.yearqtr("2021 Q4")
+
+# helper for tidy y-limits
+nice_limits <- function(v, pad_mult = 0.04) {
+  v <- v[is.finite(v)]; r <- range(v); s <- max(diff(r), 1e-9)
+  c(r[1] - pad_mult*s, r[2] + pad_mult*s)
+}
+
+# --- Load ---
+raw <- read_excel(XLSX_FILE, sheet = SHEET, skip = 0)
+names(raw) <- trimws(names(raw))
+
+# Parse "Datei t" into quarterly Date
+x <- raw[[DATE_COL]]
+yq <- suppressWarnings(as.yearqtr(x, format = "%Y Q%q"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%y"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%Y"))
+if (all(is.na(yq))) {
+  if (inherits(x, "Date")) yq <- as.yearqtr(x)
+  else if (is.numeric(x))  yq <- as.yearqtr(as.Date(x, origin = "1899-12-30"))
+  else                     yq <- as.yearqtr(suppressWarnings(as.Date(x)))
+}
+stopifnot(any(!is.na(yq)))
+Date <- as.Date(yq)
+
+# --- Build analysis frame (ALL series are already real — no deflator) ---
+d <- raw %>%
+  transmute(
+    Date,
+    yq        = yq,
+    C_real    = as.numeric(.data[[COL_C]]),
+    Y_real    = as.numeric(.data[[COL_Y]]),
+    T_real    = as.numeric(.data[[COL_T]]),
+    Wliq      = as.numeric(.data[[COL_WL]]),
+    Williq    = as.numeric(.data[[COL_WI]]),
+    MSpr      = as.numeric(.data[[COL_MS]])
+  ) %>%
+  mutate(
+    den        = Y_real - T_real,
+    num        = C_real - T_real,
+    ratio_data = num / den,
+    Wliq_den   = Wliq / den,
+    Williq_den = Williq / den,
+    Dcovid     = as.integer(yq >= COVID_START & yq <= COVID_END)   # COVID dummy
+  ) %>%
+  filter(is.finite(ratio_data), is.finite(Wliq_den), is.finite(Williq_den), is.finite(MSpr)) %>%
+  arrange(Date)
+
+# --- Two models: baseline vs + COVID dummy (intercept shift) ---
+fit_base  <- lm(ratio_data ~ Wliq_den + Williq_den + MSpr, data = d)
+fit_covid <- lm(ratio_data ~ Wliq_den + Williq_den + MSpr + Dcovid, data = d)
+
+d$pred_base  <- as.numeric(predict(fit_base,  newdata = d))
+d$pred_covid <- as.numeric(predict(fit_covid, newdata = d))
+
+ylims <- nice_limits(c(d$ratio_data, d$pred_base, d$pred_covid))
+
+# --- Plot: Observed vs Predicted (no dummy) vs Predicted (+ COVID dummy) ---
+p <- ggplot(d, aes(x = Date)) +
+  geom_line(aes(y = ratio_data,
+                colour = "Observed data", linetype = "Observed data"),
+            linewidth = 1.1) +
+  geom_line(aes(y = pred_base,
+                colour = "Predicted (no COVID dummy)",
+                linetype = "Predicted (no COVID dummy)"),
+            linewidth = 1.6, lineend = "round") +
+  geom_line(aes(y = pred_covid,
+                colour = "Predicted (+ COVID dummy)",
+                linetype = "Predicted (+ COVID dummy)"),
+            linewidth = 1.2) +
+  scale_colour_manual(
+    values = c("Observed data" = "black",
+               "Predicted (no COVID dummy)" = "#2C7FB8",
+               "Predicted (+ COVID dummy)"  = "#D95F02")
+  ) +
+  scale_linetype_manual(
+    values = c("Observed data" = "solid",
+               "Predicted (no COVID dummy)" = "dotted",
+               "Predicted (+ COVID dummy)"  = "dashed")
+  ) +
+  guides(colour = guide_legend(title = NULL),
+         linetype = guide_legend(title = NULL)) +
+  scale_y_continuous(limits = ylims, expand = expansion(mult = c(0,0))) +
+  labs(title = "Predicted vs Observed consumption-to-income ratio\nwith and without a COVID dummy (2020Q1–2021Q4)",
+       subtitle = "Regressors: Real Liquid Assets/(Y−T), Real Illiquid Assets/(Y−T), Real Mortgage Spread",
+       y = "Ratio", x = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.7),
+        plot.background = element_blank(),
+        legend.position = "bottom")
+
+print(p)
+
+# Optional: quick comparison of models
+# broom::glance(fit_base); broom::glance(fit_covid)
+# summary(fit_base); summary(fit_covid)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ===== Figure 1 — Predicted vs Observed (Date column = "Datei t") =====
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
