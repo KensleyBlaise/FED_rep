@@ -1,3 +1,75 @@
+# ===== Nice table with stargazer (console + HTML) =====
+# install.packages(c("stargazer","sandwich","lmtest"))  # run once
+
+library(stargazer)
+library(sandwich)
+library(lmtest)
+
+# Newey–West (HAC) standard errors
+nw_lag <- 4  # change if you prefer (e.g., 8)
+se_base  <- sqrt(diag(NeweyWest(m_base,  lag = nw_lag, prewhite = FALSE, adjust = TRUE)))
+se_covid <- sqrt(diag(NeweyWest(m_covid, lag = nw_lag, prewhite = FALSE, adjust = TRUE)))
+
+# Console table
+stargazer(m_base, m_covid,
+  type = "text",
+  se = list(se_base, se_covid),
+  dep.var.labels = "C / (Y − T)",
+  column.labels = c("Baseline", "+ COVID dummy"),
+  covariate.labels = c(
+    "Liquid assets / (Y−T)",
+    "Illiquid assets / (Y−T)",
+    "Mortgage spread",
+    "COVID dummy"
+  ),
+  omit.stat = c("f","ser"),
+  digits = 3,
+  notes = "HAC (Newey–West) s.e.; COVID dummy = 1 for 2020Q1–2021Q4.",
+  notes.align = "l"
+)
+
+# HTML file (open reg_table.html)
+stargazer(m_base, m_covid,
+  type = "html", out = "reg_table.html",
+  se = list(se_base, se_covid),
+  dep.var.labels = "C / (Y − T)",
+  column.labels = c("Baseline", "+ COVID dummy"),
+  covariate.labels = c(
+    "Liquid assets / (Y−T)",
+    "Illiquid assets / (Y−T)",
+    "Mortgage spread",
+    "COVID dummy"
+  ),
+  omit.stat = c("f","ser"),
+  digits = 3,
+  notes = "HAC (Newey–West) s.e.; COVID dummy = 1 for 2020Q1–2021Q4.",
+  notes.align = "l"
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ===== Chart 1 — C/(Y−T) with liquid/illiquid/(spread), COVID dummy (no interactions) =====
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(ggplot2); library(zoo)
