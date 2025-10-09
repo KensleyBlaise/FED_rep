@@ -1,3 +1,36 @@
+wb <- tryCatch(openxlsx::loadWorkbook(XLSX_FILE),
+               error = function(e) openxlsx::createWorkbook())
+
+# Overwrite if sheets exist
+if ("Fig1_data" %in% names(wb)) removeWorksheet(wb, "Fig1_data")
+if ("Fig2_rolling" %in% names(wb)) removeWorksheet(wb, "Fig2_rolling")
+
+addWorksheet(wb, "Fig1_data")
+addWorksheet(wb, "Fig2_rolling")
+
+writeData(wb, "Fig1_data",   fig1_df)
+writeData(wb, "Fig2_rolling", fig2_df)
+
+saveWorkbook(wb, XLSX_FILE, overwrite = TRUE)
+
+cat("Saved sheets 'Fig1_data' and 'Fig2_rolling' into", XLSX_FILE, "\n")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ================= Figure 2 — Rolling MPC (play with windows), 2×2 panel, WITH SPREAD =================
 # Panels:
 #  (1) Liquid MPC — rolling (no COVID dummy)
