@@ -1,3 +1,72 @@
+# ===== Standalone block: save Figure 1 & Figure 2 datasets into FED_rep.xlsx =====
+# Expects you already created:
+#   fig1_df  — data used for Chart/Figure 1 (one row per quarter)
+#   fig2_df  — rolling estimates for Figure 2 (one row per window-center date)
+#
+# Recommended columns:
+#   fig1_df: Date, C_over_(Y-T), Liquid_over_(Y-T), Illiquid_over_(Y-T),
+#            Mortgage_spread, COVID_dummy, Pred_noCOVID, Pred_withCOVID
+#   fig2_df: Date, Target (Liquid/Illiquid), Window (e.g., "20q"),
+#            COVID_dummy_in_reg (0/1), beta_cents, lo_cents, hi_cents
+#
+# If you used different column names, that's fine—this block just writes whatever is in fig1_df/fig2_df.
+
+suppressPackageStartupMessages(library(openxlsx))
+
+# ---- File & sheet names (edit if you want different names) ----
+XLSX_FILE   <- "FED_rep.xlsx"
+SHEET_FIG1  <- "Fig1_data"
+SHEET_FIG2  <- "Fig2_rolling"
+
+# ---- Sanity checks ----
+if (!exists("fig1_df")) stop("Object 'fig1_df' not found. Build it first (Figure 1 data).")
+if (!exists("fig2_df")) stop("Object 'fig2_df' not found. Build it first (Figure 2 rolling data).")
+
+# ---- Open or create workbook ----
+wb <- tryCatch(openxlsx::loadWorkbook(XLSX_FILE),
+               error = function(e) openxlsx::createWorkbook())
+
+# Remove sheets if they already exist (so we overwrite cleanly)
+if (SHEET_FIG1 %in% names(wb)) openxlsx::removeWorksheet(wb, SHEET_FIG1)
+if (SHEET_FIG2 %in% names(wb)) openxlsx::removeWorksheet(wb, SHEET_FIG2)
+
+# Add fresh sheets
+openxlsx::addWorksheet(wb, SHEET_FIG1)
+openxlsx::addWorksheet(wb, SHEET_FIG2)
+
+# Write data (keeps Date columns as Excel dates if class Date)
+openxlsx::writeData(wb, SHEET_FIG1, fig1_df)
+openxlsx::writeData(wb, SHEET_FIG2, fig2_df)
+
+# Optional: auto column widths
+openxlsx::setColWidths(wb, SHEET_FIG1, cols = 1:ncol(fig1_df), widths = "auto")
+openxlsx::setColWidths(wb, SHEET_FIG2, cols = 1:ncol(fig2_df), widths = "auto")
+
+# Save workbook
+openxlsx::saveWorkbook(wb, XLSX_FILE, overwrite = TRUE)
+
+cat("Saved '", SHEET_FIG1, "' and '", SHEET_FIG2, "' into ", XLSX_FILE, ".\n", sep = "")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 wb <- tryCatch(openxlsx::loadWorkbook(XLSX_FILE),
                error = function(e) openxlsx::createWorkbook())
 
