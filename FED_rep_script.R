@@ -1,3 +1,246 @@
+# ===== Save Figure 1 data to its own Excel file =====
+suppressPackageStartupMessages({
+  library(readxl); library(dplyr); library(zoo); library(openxlsx)
+})
+
+# --- Inputs/outputs ---
+XLSX_IN   <- "FED_rep.xlsx"
+DATA_SHEET<- "variables"
+DATE_COL  <- "Datei t"                 # exact name in column A
+XLSX_OUT  <- "Fig1_data.xlsx"          # this file will be created/overwritten
+OUT_SHEET <- "Fig1_data"
+
+# Column names (exact)
+COL_C  <- "Real Consumption"
+COL_Y  <- "Real Income"
+COL_T  <- "Real Gov Benefits"
+COL_WL <- "Real Liquid Assets"
+COL_WI <- "Real Illiquid Assets"
+COL_MS <- "Real Mortgage Spread"
+
+# COVID period (for dummy)
+COVID_START <- as.yearqtr("2020 Q1")
+COVID_END   <- as.yearqtr("2021 Q4")
+
+# --- Load & prep (ALL series already real) ---
+raw <- read_excel(XLSX_IN, sheet = DATA_SHEET)
+names(raw) <- trimws(names(raw))
+
+x  <- raw[[DATE_COL]]
+yq <- suppressWarnings(as.yearqtr(x, format = "%Y Q%q"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%y"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%Y"))
+if (all(is.na(yq))) {
+  if (inherits(x, "Date")) yq <- as.yearqtr(x)
+  else if (is.numeric(x))  yq <- as.yearqtr(as.Date(x, origin = "1899-12-30"))
+  else                     yq <- as.yearqtr(suppressWarnings(as.Date(x)))
+}
+stopifnot(any(!is.na(yq)))
+
+d <- raw %>%
+  transmute(
+    Date   = as.Date(yq),
+    yq     = yq,
+    C_real = as.numeric(.data[[COL_C]]),
+    Y_real = as.numeric(.data[[COL_Y]]),
+    T_real = as.numeric(.data[[COL_T]]),
+    Wliq   = as.numeric(.data[[COL_WL]]),
+    Williq = as.numeric(.data[[COL_WI]]),
+    MSpr   = as.numeric(.data[[COL_MS]])
+  ) %>%
+  mutate(
+    den        = Y_real - T_real,
+    ratio_data = C_real / den,          # DEP VAR: C / (Y - T)
+    Wliq_den   = Wliq / den,
+    Williq_den = Williq / den,
+    Dcovid     = as.integer(yq >= COVID_START & yq <= COVID_END)
+  ) %>%
+  filter(is.finite(ratio_data), is.finite(Wliq_den), is.finite(Williq_den), is.finite(MSpr)) %>%
+  arrange(Date)
+
+# --- Fit & predict (with spread) ---
+m_base  <- lm(ratio_data ~ Wliq_den + Williq_den + MSpr, data = d)
+m_covid <- lm(ratio_data ~ Wliq_den + Williq_den + MSpr + Dcovid, data = d)
+
+fig1_df <- d %>%
+  mutate(
+    Pred_noCOVID   = as.numeric(predict(m_base,  newdata = d)),
+    Pred_withCOVID = as.numeric(predict(m_covid, newdata = d))
+  ) %>%
+  transmute(
+    Date,
+    `C_over_(Y-T)`         = ratio_data,
+    `Liquid_over_(Y-T)`    = Wliq_den,
+    `Illiquid_over_(Y-T)`  = Williq_den,
+    `Mortgage_spread`      = MSpr,
+    `COVID_dummy`          = Dcovid,
+    `Pred_noCOVID`         = Pred_noCOVID,
+    `Pred_withCOVID`       = Pred_withCOVID
+  )
+
+# --- Write to a separate Excel file ---
+wb <- createWorkbook()
+addWorksheet(wb, OUT_SHEET)
+writeData(wb, OUT_SHEET, fig1_df)
+setColWidths(wb, OUT_SHEET, cols = 1:ncol(fig1_df), widths = "auto")
+saveWorkbook(wb, XLSX_OUT, overwrite = TRUE)
+cat("Saved Figure 1 data to: ", XLSX_OUT, " (sheet '", OUT_SHEET, "')\n", sep = "")
+
+
+# ===== Save Figure 2 rolling-MPC data to its own Excel file =====
+suppressPackageStartupMessages({
+  library(readxl); library(dplyr); library(zoo); library(openxlsx)
+})
+
+# --- Inputs/outputs ---
+XLSX_IN   <- "FED_rep.xlsx"
+DATA_SHEET<- "variables"
+DATE_COL  <- "Datei t"
+XLSX_OUT  <- "Fig2_rolling.xlsx"       # this file will be created/overwritten
+OUT_SHEET <- "Fig2_rolling"
+
+# Column names (exact)
+COL_C  <- "Real Consumption"
+COL_Y  <- "Real Income"
+COL_T  <- "Real Gov Benefits"
+COL_WL <- "Real Liquid Assets"
+COL_WI <- "Real Illiquid Assets"
+COL_MS <- "Real Mortgage Spread"
+
+# COVID period (for dummy inside rolling regressions)
+COVID_START <- as.yearqtr("2020 Q1")
+COVID_END   <- as.yearqtr("2021 Q4")
+
+# Rolling windows to export (edit if you want)
+ROLL_WINS <- c(10L, 15L, 20L)
+
+# --- Load & prep (ALL series already real) ---
+raw <- read_excel(XLSX_IN, sheet = DATA_SHEET)
+names(raw) <- trimws(names(raw))
+
+x  <- raw[[DATE_COL]]
+yq <- suppressWarnings(as.yearqtr(x, format = "%Y Q%q"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%y"))
+if (all(is.na(yq))) yq <- suppressWarnings(as.yearqtr(x, format = "%b-%Y"))
+if (all(is.na(yq))) {
+  if (inherits(x, "Date")) yq <- as.yearqtr(x)
+  else if (is.numeric(x))  yq <- as.yearqtr(as.Date(x, origin = "1899-12-30"))
+  else                     yq <- as.yearqtr(suppressWarnings(as.Date(x)))
+}
+stopifnot(any(!is.na(yq)))
+
+d <- raw %>%
+  transmute(
+    Date   = as.Date(yq),
+    yq     = yq,
+    C_real = as.numeric(.data[[COL_C]]),
+    Y_real = as.numeric(.data[[COL_Y]]),
+    T_real = as.numeric(.data[[COL_T]]),
+    Wliq   = as.numeric(.data[[COL_WL]]),
+    Williq = as.numeric(.data[[COL_WI]]),
+    MSpr   = as.numeric(.data[[COL_MS]])
+  ) %>%
+  mutate(
+    den        = Y_real - T_real,
+    ratio_data = C_real / den,          # DEP VAR: C / (Y - T)
+    Wliq_den   = Wliq / den,
+    Williq_den = Williq / den,
+    Dcovid     = as.integer(yq >= COVID_START & yq <= COVID_END)
+  ) %>%
+  filter(is.finite(ratio_data), is.finite(Wliq_den), is.finite(Williq_den), is.finite(MSpr)) %>%
+  arrange(Date)
+
+# --- Rolling helper (ALWAYS includes spread; intercept-only COVID dummy when used) ---
+roll_coeff <- function(df, win, target = c("liq","ill"), with_dummy = FALSE) {
+  target <- match.arg(target)
+  n <- nrow(df); if (n < win) stop("Not enough rows for window ", win, " (n = ", n, ")")
+  out <- vector("list", n - win + 1L)
+  for (s in 1:(n - win + 1L)) {
+    e <- s + win - 1L
+    center <- if (win %% 2 == 0) s + (win/2 - 1L) else s + floor(win/2)
+    sub <- df[s:e, , drop = FALSE]
+    fml <- if (with_dummy) {
+      ratio_data ~ Wliq_den + Williq_den + MSpr + Dcovid
+    } else {
+      ratio_data ~ Wliq_den + Williq_den + MSpr
+    }
+    ok <- all(is.finite(sub$ratio_data), is.finite(sub$Wliq_den),
+              is.finite(sub$Williq_den), is.finite(sub$MSpr))
+    if (!ok || var(sub[[ifelse(target=="liq","Wliq_den","Williq_den")]], na.rm = TRUE) <= 0) {
+      out[[s]] <- data.frame(Date = df$Date[center], beta = NA_real_, se = NA_real_)
+      next
+    }
+    fit <- try(lm(fml, data = sub), silent = TRUE)
+    if (inherits(fit, "try-error")) {
+      out[[s]] <- data.frame(Date = df$Date[center], beta = NA_real_, se = NA_real_)
+      next
+    }
+    coef_name <- if (target == "liq") "Wliq_den" else "Williq_den"
+    b  <- tryCatch(as.numeric(coef(fit)[coef_name]), error = function(e) NA_real_)
+    se <- tryCatch(summary(fit)$coef[coef_name, "Std. Error"], error = function(e) NA_real_)
+    out[[s]] <- data.frame(Date = df$Date[center], beta = b, se = se)
+  }
+  dplyr::bind_rows(out) %>%
+    mutate(
+      Target     = ifelse(target == "liq", "Liquid", "Illiquid"),
+      Window     = paste0(win, "q"),
+      COVID_dummy_in_reg = as.integer(with_dummy),
+      beta_cents = 100 * beta,
+      lo_cents   = 100 * (beta - 1.96 * se),
+      hi_cents   = 100 * (beta + 1.96 * se)
+    ) %>%
+    select(Date, Target, Window, COVID_dummy_in_reg, beta_cents, lo_cents, hi_cents)
+}
+
+# --- Build tidy rolling table for all windows/targets and with/without COVID dummy ---
+fig2_df <- bind_rows(
+  lapply(ROLL_WINS, \(w) roll_coeff(d, w, "liq", with_dummy = FALSE)) |> bind_rows(),
+  lapply(ROLL_WINS, \(w) roll_coeff(d, w, "ill", with_dummy = FALSE)) |> bind_rows(),
+  lapply(ROLL_WINS, \(w) roll_coeff(d, w, "liq", with_dummy = TRUE )) |> bind_rows(),
+  lapply(ROLL_WINS, \(w) roll_coeff(d, w, "ill", with_dummy = TRUE )) |> bind_rows()
+) %>%
+  arrange(Target, COVID_dummy_in_reg, Window, Date)
+
+# --- Write to a separate Excel file ---
+wb <- createWorkbook()
+addWorksheet(wb, OUT_SHEET)
+writeData(wb, OUT_SHEET, fig2_df)
+setColWidths(wb, OUT_SHEET, cols = 1:ncol(fig2_df), widths = "auto")
+saveWorkbook(wb, XLSX_OUT, overwrite = TRUE)
+cat("Saved Figure 2 rolling data to: ", XLSX_OUT, " (sheet '", OUT_SHEET, "')\n", sep = "")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ===== Standalone block: save Figure 1 & Figure 2 datasets into FED_rep.xlsx =====
 # Expects you already created:
 #   fig1_df  — data used for Chart/Figure 1 (one row per quarter)
