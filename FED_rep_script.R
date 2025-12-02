@@ -1,3 +1,125 @@
+
+library(dplyr)
+library(tidyr)
+library(lubridate)
+##########################################################################################
+rm(list=ls ())
+
+
+# 1. CREATE DATES (1982-01 to 2024-12)
+# --------------------------------
+dates <- seq.Date(
+  from = as.Date("1982-01-01"),
+  to   = as.Date("2024-12-01"),
+  by   = "month"
+)
+n_months <- length(dates)  # should be 516 months
+
+# month index: 1..12 repeating each year
+mon_vec <- as.integer(format(dates, "%m"))  # 1 for Jan, 2 for Feb, ..., 12 for Dec
+
+# --------------------------------
+# 2. VARIABLE NAMES (7 series)
+# --------------------------------
+vars <- c(
+  "michigan.fcast",
+  "inf.cpi",
+  "inf.cpi.first",
+  "inf.commod",
+  "fed.funds.rate",
+  "unemp",
+  "log.ip"
+)
+n_vars <- length(vars)
+
+# --------------------------------
+# 3. BUILD df.m IN LONG FORMAT
+#    ONE row per month per variable (516 months × 7 vars = 3,612 rows)
+# --------------------------------
+df.m <- data.frame(
+  date         = rep(dates, times = n_vars),       # repeat dates for each variable
+  mon          = rep(mon_vec, times = n_vars),     # repeat mon for each variable
+  variable     = rep(vars, each = n_months),       # each variable gets all months
+  value        = rnorm(n_months * n_vars, 0, 1),   
+  value.deseas = rnorm(n_months * n_vars, 0, 1)    
+)
+
+# Check structure
+head(df.m, 20)
+# You should see:
+# date        mon  variable          value  value.deseas
+# 1982-01-01  1    michigan.fcast    ...    ...
+# 1982-02-01  2    michigan.fcast    ...    ...
+# ...
+# 1982-12-01  12   michigan.fcast    ...    ...
+# 1983-01-01  1    michigan.fcast    ...    ... (mon restarts)
+# ...
+# 2024-12-01  12   michigan.fcast    ...    ...
+# 1982-01-01  1    inf.cpi           ...    ... (next variable starts)
+
+# --------------------------------
+# 4. EMPTY df.q
+# --------------------------------
+df.q <- data.frame(
+  date         = as.Date(character()),
+  mon          = integer(),
+  variable     = character(),
+  value        = numeric(),
+  value.deseas = numeric()
+)
+
+unique(df$variable)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ===== Save Figure 1 data to its own Excel file =====
 suppressPackageStartupMessages({
   library(readxl); library(dplyr); library(zoo); library(openxlsx)
